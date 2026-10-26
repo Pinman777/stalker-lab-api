@@ -25,6 +25,7 @@ const API_SECRET = 'test-bingx-secret-0123456789abcdefghijklmnop';
 const scenario = {
   balanceCode: 0, // code в ответе /user/balance (0 = ключ валиден)
   rejectAll: false, // эмуляция отозванного ключа: ВСЕ подписанные запросы → 100414
+  syncFailCode: 0, // w4-fix1: код для income/positionHistory (100419 = rate-limit биржи)
   incomesUsdt: [{ symbol: 'BTC-USDT' }, { symbol: 'ETH-USDT' }],
   positionsBtc: [] as Array<Record<string, unknown>>, // /trade/positionHistory?symbol=BTC-USDT
 };
@@ -69,6 +70,7 @@ const P2_CLOSE = NOW - 2 * DAY;
 function resetScenario(): void {
   scenario.balanceCode = 0;
   scenario.rejectAll = false;
+  scenario.syncFailCode = 0;
   scenario.incomesUsdt = [{ symbol: 'BTC-USDT' }, { symbol: 'ETH-USDT' }];
   scenario.positionsBtc = [
     closedPosition(P1_ID, 'LONG', P1_OPEN, P1_CLOSE, '125.40'),
@@ -115,10 +117,12 @@ async function startMock(): Promise<{ server: Server; base: string }> {
       return ok({ asset: 'USDT', balance: '1000.00', equity: '1005.40' });
     }
     if (u.pathname === '/openApi/swap/v2/user/income') {
+      if (scenario.syncFailCode !== 0) return fail(scenario.syncFailCode, 'Too many requests');
       if (query.get('currency') === 'USDC') return ok([]);
       return ok(scenario.incomesUsdt.map((i) => ({ ...i, incomeType: 'REALIZED_PROGRESS', income: '1.0', asset: 'USDT', time: NOW })));
     }
     if (u.pathname === '/openApi/swap/v2/trade/positionHistory') {
+      if (scenario.syncFailCode !== 0) return fail(scenario.syncFailCode, 'Too many requests');
       if (query.get('pageIndex') !== '0') return ok([]); // одна страница для тестовых данных
       if (query.get('symbol') === 'BTC-USDT') return ok(scenario.positionsBtc);
       return ok([]);
@@ -209,6 +213,14 @@ it('guide: 7 шагов, права Read, предупреждение про Wi
   const joined = JSON.stringify(r.body);
   expect(joined).toContain('Read');
   expect(joined).toContain('Withdraw');
+});
+
+it('guide (w4-fix3): предупреждение о потере авто-истории при отвязке', async () => {
+  const u = await newUser();
+  const r = await call('GET', '/api/v1/connections/bingx/guide', u);
+  const warnings = (r.body!.warnings as string[]).join(' ');
+  expect(warnings).toContain('Отвязка удаляет авто-историю');
+  expect(warnings).toContain('последние 7 дней');
 });
 
 // ─── bind ───
@@ -456,9 +468,73 @@ it('sync с умершим ключом → 403 invalid_api_key (ключ ото
   expect(audit.rows[0].n).toBe(1);
 });
 
+// ─── w4: review fixes 1-4 (analyst PASS-with-notes) ───
+
+it('fix1: rate-limit биржи (100419) на sync → 502 bingx_rate_limited, НЕ invalid_api_key', async () => {
+  const u = await newUser();
+  await bind(u);
+  scenario.syncFailCode = 100419; // биржа душит по лимиту — ключ при этом живой
+  const r = await call('POST', '/api/v1/connections/bingx/sync', u);
+  expect(r.status).toBe(502);
+  expect(r.body?.error).toBe('bingx_rate_limited');
+  // юзер не должен ротировать рабочий ключ: подключение живо, повторный синк лечит
+  expect((await call('GET', '/api/v1/connections', u)).body!.connections).toHaveLength(1);
+  const audit = await db.query(
+    `SELECT count(*)::int AS n FROM audit_log WHERE user_id = $1 AND action = 'bingx_sync_fail'`,
+    [u.id],
+  );
+  expect(audit.rows[0].n).toBe(1);
+});
+
+it('fix1: 100419 на bind-валидации → тоже 502 bingx_rate_limited (не «ключ невалиден»)', async () => {
+  const u = await newUser();
+  scenario.balanceCode = 100419;
+  const r = await bind(u);
+  expect(r.status).toBe(502);
+  expect(r.body?.error).toBe('bingx_rate_limited');
+});
+
+it('fix2: два параллельных sync → один 200, второй 409 sync_in_progress (advisory lock)', async () => {
+  const u = await newUser();
+  await bind(u);
+  const [a, b] = await Promise.all([
+    call('POST', '/api/v1/connections/bingx/sync', u),
+    call('POST', '/api/v1/connections/bingx/sync', u),
+  ]);
+  expect([a.status, b.status].sort()).toEqual([200, 409]); // лок гарантирует ровно одного победителя
+  const conflict = a.status === 409 ? a : b;
+  expect(conflict.body?.error).toBe('sync_in_progress');
+  // победивший синк отработал целиком, дублей нет
+  expect((await db.query('SELECT count(*)::int AS n FROM auto_trades')).rows[0].n).toBe(2);
+});
+
+it('fix4: ротация CONN_ENC_KEY → 503 conn_decrypt_failed, не голый 500 (+аудит, подключение живо)', async () => {
+  const u = await newUser();
+  await bind(u);
+  const realKey = process.env.CONN_ENC_KEY as string;
+  process.env.CONN_ENC_KEY = 'rotated-other-passphrase-w4-test'; // старый ct больше не расшифровывается
+  let r: { status: number; body: Record<string, any> | null };
+  try {
+    r = await call('POST', '/api/v1/connections/bingx/sync', u);
+  } finally {
+    process.env.CONN_ENC_KEY = realKey;
+  }
+  expect(r.status).not.toBe(500); // не internal
+  expect(r.status).toBe(503);
+  expect(r.body?.error).toBe('conn_decrypt_failed');
+  // graceful skip: строка подключения не снесена — лечится re-bind с replace
+  const cnt = await db.query('SELECT count(*)::int AS n FROM connections WHERE user_id = $1', [u.id]);
+  expect(cnt.rows[0].n).toBe(1);
+  const audit = await db.query<{ detail: string }>(
+    `SELECT detail FROM audit_log WHERE user_id = $1 AND action = 'bingx_sync_fail'`,
+    [u.id],
+  );
+  expect(audit.rows[0].detail).toContain('conn_decrypt_failed');
+});
+
 // ─── unbind ───
 
-it('unbind: подключение и авто-сделки снесены, re-bind работает', async () => {
+it('unbind: подключение и авто-сделки снесены, re-bind работает; deleted_trades честно посчитан', async () => {
   const u = await newUser();
   await bind(u);
   await call('POST', '/api/v1/connections/bingx/sync', u);
@@ -467,6 +543,7 @@ it('unbind: подключение и авто-сделки снесены, re-b
   const r = await call('POST', '/api/v1/connections/bingx/unbind', u);
   expect(r.status).toBe(200);
   expect(r.body?.unbound).toBe(true);
+  expect(r.body?.deleted_trades).toBe(2); // w4-fix3: ответ не молчит про потери
 
   expect((await call('GET', '/api/v1/connections', u)).body!.connections).toHaveLength(0);
   expect((await call('GET', '/api/v1/journal/auto', u)).body!.trades).toHaveLength(0);
@@ -480,6 +557,14 @@ it('unbind: подключение и авто-сделки снесены, re-b
 
   const again = await bind(u);
   expect(again.status).toBe(201);
+});
+
+it('unbind без синка → deleted_trades: 0', async () => {
+  const u = await newUser();
+  await bind(u);
+  const r = await call('POST', '/api/v1/connections/bingx/unbind', u);
+  expect(r.status).toBe(200);
+  expect(r.body?.deleted_trades).toBe(0);
 });
 
 it('unbind без подключения → 404', async () => {

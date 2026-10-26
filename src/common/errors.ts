@@ -29,4 +29,7 @@ export const errors = {
   invalidApiKey: () => new ApiError(403, 'invalid_api_key'), // нед4: биржа отвергла ключ (bind/синк)
   connectionExists: () => new ApiError(409, 'connection_exists'), // нед4: venue уже привязан (bind без replace)
   bingxUnreachable: () => new ApiError(502, 'bingx_unreachable'), // нед4: биржа не отвечает (не ошибка ключа)
+  bingxRateLimited: () => new ApiError(502, 'bingx_rate_limited'), // w4-fix1: BingX 100419 — лимит запросов, НЕ мёртвый ключ
+  syncInProgress: () => new ApiError(409, 'sync_in_progress'), // w4-fix2: advisory-lock — синк этого юзера уже идёт
+  connDecryptFailed: () => new ApiError(503, 'conn_decrypt_failed'), // w4-fix4: api_secret_enc не расшифровывается (ротация CONN_ENC_KEY) — лечится re-bind
 };

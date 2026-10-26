@@ -4,7 +4,7 @@ import { errors } from '../../common/errors';
 import { getIp } from '../../common/ip';
 import { writeAudit } from '../../common/audit';
 import { SlidingWindowRateLimiter } from '../../common/rate-limit';
-import { ConnectionsService, type BindResult, type ConnectionDto, type SyncResult } from './connections.service';
+import { ConnectionsService, type BindResult, type ConnectionDto, type SyncResult, type UnbindResult } from './connections.service';
 import { BINGX_GUIDE, type BingxBindGuide } from './guide';
 import type { AuthedRequest } from '../../common/authed-request';
 
@@ -34,10 +34,10 @@ export class ConnectionsController {
     return this.connections.bindBingx(req.user!.id, b.apiKey, b.apiSecret, b.replace, getIp(req));
   }
 
-  /** Отвязка (+ аудит; авто-сделки каскадом — см. миграцию 008). */
+  /** Отвязка (+ аудит; авто-сделки каскадом — см. миграцию 008; deleted_trades — сколько снесено). */
   @Post('bingx/unbind')
   @HttpCode(200)
-  async unbind(@Req() req: AuthedRequest): Promise<{ venue: 'bingx'; unbound: true }> {
+  async unbind(@Req() req: AuthedRequest): Promise<UnbindResult> {
     this.limited(req, 'unbind');
     return this.connections.unbindBingx(req.user!.id, getIp(req));
   }

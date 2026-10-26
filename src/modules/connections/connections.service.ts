@@ -46,6 +46,12 @@ export interface BindResult {
   bound_at: string;
 }
 
+export interface UnbindResult {
+  venue: 'bingx';
+  unbound: true;
+  deleted_trades: number; // w4-fix3: авто-сделок снесено каскадом (предупреждение о потере — в гайде)
+}
+
 export interface SyncResult {
   venue: 'bingx';
   from: string;
@@ -109,7 +115,12 @@ export class ConnectionsService implements OnModuleInit {
         throw errors.bingxUnreachable();
       }
       if (e instanceof BingXApiError) {
-        // Любой ошибочный код от биржи при проверке ключа = ключ не работает
+        // w4-fix1: rate-limit ≠ мёртвый ключ — иначе юзер ротирует рабочий ключ.
+        if (e.rateLimited) {
+          await writeAudit(userId, ip, 'bingx_bind_fail', `rate_limited code=${e.code} ${e.msg}`);
+          throw errors.bingxRateLimited();
+        }
+        // Прочие ошибочные коды от биржи при проверке ключа = ключ не работает
         // (нет ключа / плохая подпись / нет прав Read). MVP: коды не разделяем.
         await writeAudit(userId, ip, 'bingx_bind_fail', `code=${e.code} ${e.msg}`);
         throw errors.invalidApiKey();
@@ -152,13 +163,22 @@ export class ConnectionsService implements OnModuleInit {
     return { venue: 'bingx', masked: row.masked, bound_at: row.bound_at.toISOString() };
   }
 
-  /** POST /connections/bingx/unbind — снос подключения (авто-сделки каскадом, см. миграцию 008). */
-  async unbindBingx(userId: string, ip: string): Promise<{ venue: 'bingx'; unbound: true }> {
+  /** POST /connections/bingx/unbind — снос подключения (авто-сделки каскадом, см. миграцию 008).
+   *  w4-fix3: ответ честно говорит, сколько авто-сделок снесено (deleted_trades),
+   *  считаем в той же транзакции, что и удаление — без окна гонки с параллельным синком. */
+  async unbindBingx(userId: string, ip: string): Promise<UnbindResult> {
     const existing = await this.findConnection(userId, 'bingx');
     if (!existing) throw errors.notFound();
-    await db.query('DELETE FROM connections WHERE id = $1 AND user_id = $2', [existing.id, userId]);
-    await writeAudit(userId, ip, 'bingx_unbind', `masked=${existing.masked}`);
-    return { venue: 'bingx', unbound: true };
+    const deletedTrades = await db.tx(async (c) => {
+      const cnt = await c.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM auto_trades WHERE connection_id = $1',
+        [existing.id],
+      );
+      await c.query('DELETE FROM connections WHERE id = $1 AND user_id = $2', [existing.id, userId]);
+      return cnt.rows[0].n;
+    });
+    await writeAudit(userId, ip, 'bingx_unbind', `masked=${existing.masked} deleted_trades=${deletedTrades}`);
+    return { venue: 'bingx', unbound: true, deleted_trades: deletedTrades };
   }
 
   /** GET /connections — список подключений юзера (секреты наружу не отдаём никогда). */
@@ -178,43 +198,65 @@ export class ConnectionsService implements OnModuleInit {
    *  затем по каждому символу листаем positionHistory (pageIndex от 0, до пустой/короткой
    *  страницы). В журнал идут только ПОЛНОСТЬЮ закрытые позиции (closeAllPositions).
    *  Идемпотентность: UNIQUE(connection_id, exchange_ref) + ON CONFLICT DO UPDATE —
-   *  повторный синк обновляет (частичное закрытие доросло до полного), не дублирует. */
+   *  повторный синк обновляет (частичное закрытие доросло до полного), не дублирует.
+   *
+   *  w4-fix2: весь синк — ОДНА транзакция с pg_try_advisory_xact_lock по user_id.
+   *  Лок держится всё время синка (включая HTTP-запросы к бирже): параллельные синки
+   *  того же юзера удваивали бы 5 req/s биржи → второй синк сразу 409 sync_in_progress
+   *  (выбран вариант «сразу 409» вместо ожидания — проще и не копит очередь).
+   *  xact-лок живёт до COMMIT/ROLLBACK и умирает вместе с соединением — утечки нет. */
   async syncBingx(userId: string, ip: string): Promise<SyncResult> {
-    const conn = await this.findConnection(userId, 'bingx');
-    if (!conn) throw errors.notFound();
-    const apiSecret = decryptSecret(conn.api_key, conn.api_secret_enc);
+    return db.tx<SyncResult>(async (c) => {
+      const lock = await c.query<{ locked: boolean }>(
+        'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked',
+        [userId],
+      );
+      if (!lock.rows[0].locked) throw errors.syncInProgress();
 
-    const endTime = Date.now();
-    const startTime = endTime - SYNC_WINDOW_MS;
+      const conn = await this.findConnection(userId, 'bingx', c);
+      if (!conn) throw errors.notFound();
 
-    let symbols: string[];
-    try {
-      symbols = await this.discoverSymbols(conn.api_key, apiSecret, startTime, endTime);
-    } catch (e) {
-      await this.handleSyncError(e, userId, ip);
-      throw e; // handleSyncError всегда бросает
-    }
+      // w4-fix4: битая строка api_secret_enc или ротация CONN_ENC_KEY — раньше был голый
+      // 500 без аудита. Теперь: явная ошибка + аудит + это подключение пропускается
+      // (не роняет синк целиком и не трогает ключ — лечится re-bind с replace).
+      let apiSecret: string;
+      try {
+        apiSecret = decryptSecret(conn.api_key, conn.api_secret_enc);
+      } catch (e) {
+        await writeAudit(userId, ip, 'bingx_sync_fail', `conn_decrypt_failed masked=${conn.masked}: ${String(e)}`);
+        throw errors.connDecryptFailed();
+      }
 
-    let positionsSeen = 0;
-    const closed: BingxPositionHistoryItem[] = [];
-    try {
-      for (const symbol of symbols) {
-        // пагинация pageIndex=0.. до короткой страницы (pageSize < запрошенного = хвост)
-        for (let pageIndex = 0; ; pageIndex++) {
-          const page = await fetchPositionHistory(conn.api_key, apiSecret, symbol, startTime, endTime, pageIndex);
-          positionsSeen += page.length;
-          closed.push(...page.filter((p) => p.closeAllPositions));
-          if (page.length < 100) break; // 100 = pageSize по умолчанию (доки)
+      const endTime = Date.now();
+      const startTime = endTime - SYNC_WINDOW_MS;
+
+      let symbols: string[];
+      try {
+        symbols = await this.discoverSymbols(conn.api_key, apiSecret, startTime, endTime);
+      } catch (e) {
+        await this.handleSyncError(e, userId, ip);
+        throw e; // handleSyncError всегда бросает
+      }
+
+      let positionsSeen = 0;
+      const closed: BingxPositionHistoryItem[] = [];
+      try {
+        for (const symbol of symbols) {
+          // пагинация pageIndex=0.. до короткой страницы (pageSize < запрошенного = хвост)
+          for (let pageIndex = 0; ; pageIndex++) {
+            const page = await fetchPositionHistory(conn.api_key, apiSecret, symbol, startTime, endTime, pageIndex);
+            positionsSeen += page.length;
+            closed.push(...page.filter((p) => p.closeAllPositions));
+            if (page.length < 100) break; // 100 = pageSize по умолчанию (доки)
+            await delay(INTER_REQUEST_DELAY_MS);
+          }
           await delay(INTER_REQUEST_DELAY_MS);
         }
-        await delay(INTER_REQUEST_DELAY_MS);
+      } catch (e) {
+        await this.handleSyncError(e, userId, ip);
+        throw e;
       }
-    } catch (e) {
-      await this.handleSyncError(e, userId, ip);
-      throw e;
-    }
 
-    const { imported, updated } = await db.tx(async (c) => {
       let ins = 0;
       let upd = 0;
       for (const p of closed) {
@@ -245,19 +287,21 @@ export class ConnectionsService implements OnModuleInit {
         else upd += 1;
       }
       await c.query('UPDATE connections SET last_sync_at = now() WHERE id = $1', [conn.id]);
-      return { imported: ins, updated: upd };
-    });
 
-    await writeAudit(userId, ip, 'bingx_sync', `symbols=${symbols.length} imported=${imported} updated=${updated}`);
-    return {
-      venue: 'bingx',
-      from: new Date(startTime).toISOString(),
-      to: new Date(endTime).toISOString(),
-      symbols_scanned: symbols.length,
-      positions_seen: positionsSeen,
-      imported,
-      updated,
-    };
+      return {
+        venue: 'bingx',
+        from: new Date(startTime).toISOString(),
+        to: new Date(endTime).toISOString(),
+        symbols_scanned: symbols.length,
+        positions_seen: positionsSeen,
+        imported: ins,
+        updated: upd,
+      };
+    }).then(async (result) => {
+      // аудит успеха — после COMMIT: неудача аудита не откатывает синк
+      await writeAudit(userId, ip, 'bingx_sync', `symbols=${result.symbols_scanned} imported=${result.imported} updated=${result.updated}`);
+      return result;
+    });
   }
 
   private async discoverSymbols(
@@ -276,13 +320,19 @@ export class ConnectionsService implements OnModuleInit {
     return [...symbols].sort();
   }
 
-  /** Единая обработка ошибок синка: биржа недоступна → 502, ключ умер → 403 (+audit). */
+  /** Единая обработка ошибок синка: биржа недоступна → 502, rate-limit → 502 bingx_rate_limited
+   *  (НЕ «ключ невалиден» — рабочий ключ ротировать не надо), ключ умер → 403 (+audit всем). */
   private async handleSyncError(e: unknown, userId: string, ip: string): Promise<never> {
     if (e instanceof BingXUnreachableError) {
       await writeAudit(userId, ip, 'bingx_sync_fail', 'unreachable');
       throw errors.bingxUnreachable();
     }
     if (e instanceof BingXApiError) {
+      // w4-fix1: 100419 — биржа тормозит нас, ключ живой
+      if (e.rateLimited) {
+        await writeAudit(userId, ip, 'bingx_sync_fail', `rate_limited code=${e.code} ${e.msg}`);
+        throw errors.bingxRateLimited();
+      }
       // ключ отозван/права сняли после bind'а — следующая привязка это починит
       await writeAudit(userId, ip, 'bingx_sync_fail', `code=${e.code} ${e.msg}`);
       throw errors.invalidApiKey();

@@ -18,6 +18,11 @@ import { createHmac } from 'crypto';
 
 export const BINGX_DEFAULT_BASE = 'https://open-api.bingx.com';
 
+/** BingX code 100419: превышен rate-limit запросов (5 req/s на юзера для trade-эндпоинтов).
+ *  КРИТИЧНО отличать от ошибки ключа: ответ «ключ невалиден» на rate-limit заставляет
+ *  юзера ротировать РАБОЧИЙ ключ. Все прочие code !== 0 в MVP не разделяются. */
+export const BINGX_RATE_LIMIT_CODE = 100419;
+
 export function bingxBaseUrl(): string {
   return process.env.BINGX_API_BASE || BINGX_DEFAULT_BASE;
 }
@@ -30,6 +35,11 @@ export class BingXApiError extends Error {
   ) {
     super(`bingx api error ${code}: ${msg}`);
     this.name = 'BingXApiError';
+  }
+
+  /** 100419 — биржа просит притормозить, ключ при этом живой. */
+  get rateLimited(): boolean {
+    return this.code === BINGX_RATE_LIMIT_CODE;
   }
 }
 
