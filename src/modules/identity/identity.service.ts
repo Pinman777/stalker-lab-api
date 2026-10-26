@@ -54,21 +54,19 @@ export class IdentityService {
     }
 
     // Новый юзер: аккаунт + погашение инвайта атомарны; битый/чужой код → rollback, аккаунта-сироты нет.
+    // tx возвращает UserRow ЛИБО маркер «уже создан параллельным запросом» (review #3).
+    const ALREADY = Symbol('already-created');
     let user: UserRow;
     try {
-      user = await db.tx(async (c) => {
+      const res = await db.tx(async (c): Promise<UserRow | typeof ALREADY> => {
         let u: UserRow;
         try {
           u = await insertUser(c, tg);
         } catch (e: unknown) {
-          // параллельный first-auth того же telegram_id (review #3): уникальный конфликт → уже создан
           const code = (e as { code?: string }).code;
           if (code === '23505') {
-            const existing = await findUserByTelegramId(c, tg.id);
-            if (existing) {
-              await c.query('COMMIT');
-              return { user: toUserDto(existing), isNew: false };
-            }
+            const again = await findUserByTelegramId(c, tg.id);
+            if (again) return ALREADY;
           }
           throw e;
         }
@@ -76,6 +74,15 @@ export class IdentityService {
         if (!consumed) throw errors.inviteRequired();
         return u;
       });
+      if (res === ALREADY) {
+        const again = await findUserByTelegramId(db, tg.id);
+        if (again) {
+          await writeAudit(again.id, ip, 'auth_ok');
+          return { user: toUserDto(again), isNew: false };
+        }
+        throw errors.inviteRequired();
+      }
+      user = res;
     } catch (e) {
       if (e instanceof HttpException && e.getStatus() === 403) {
         await writeAudit(null, ip, 'auth_fail', 'bad_invite_code');
