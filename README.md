@@ -1,6 +1,6 @@
 # stalker-lab-api
 
-Backend Stalker Lab (АРХИТЕКТУРА v0.2, неделя 1): identity + INVITE-ONLY + каркас доменов.
+Backend Stalker Lab (АРХИТЕКТУРА v0.2, неделя 2): identity + INVITE-ONLY + **журнал (ядро продукта)** + дисциплина из журнала + кодекс.
 NestJS 10 (module-per-domain) + TypeScript strict + PostgreSQL (raw `pg`, канон invest-pool).
 `main.ts` — только бутстрап; анти-паттерн invest-pool (монолит 1794 строки) не переносится.
 
@@ -66,6 +66,40 @@ curl -s localhost:8910/api/v1/me -H "x-telegram-init-data: $INIT_DATA"
 initData (±24ч) → `401 {"error":"invalid_init_data"}`; 6-я попытка с IP за минуту →
 `429 {"error":"rate_limited"}` (+ запись в audit_log).
 
+## Журнал (неделя 2) — ядро продукта
+
+Все эндпоинты за `x-telegram-init-data`; данные — только свои (чужая сессия → `403 forbidden`).
+
+| Endpoint | Что делает | Дисциплина |
+|---|---|---|
+| `POST /api/v1/journal/entries` `{date, plan}` | сессия-вылазка дня; **одна на день** (`UNIQUE(user_id,date)` → дубль `409 entry_exists`) | `journal_entry` **+5** |
+| `POST /api/v1/journal/entries/:id/trades` `{sym, dir: long\|short, entry, stop, exit, r?, setup?, violation_code?}` | сделка только в **свою открытую** сессию (закрыта → `403 entry_closed`); `violation_code` ∈ `codex_rules` (иначе `400 unknown_violation_code`) | `journal_trade` **+5**; сделка с нарушением — **без баллов** + `audit_log(codex_violation)` |
+| `PATCH /api/v1/journal/entries/:id` `{review, status:"closed"}` | разбор дня закрывает сессию; повтор → `409 entry_closed` | `journal_review` **+3** |
+| `GET /api/v1/journal/entries?from&to` | свои сессии (date DESC, `tradesCount`); `from`/`to` опциональны, включительно, `YYYY-MM-DD` | — |
+| `GET /api/v1/journal/entries/:id` | сессия + её `trades` | — |
+| `GET /api/v1/me/stats` | `{points, events, byType}` из discipline-ledger | — |
+
+- Гонки закрыты атомарными условными UPDATE/INSERT..SELECT (`status='draft'` в том же
+  утверждении): «trade против закрытия» и «двойное закрытие» не проходят.
+- Инвариант дисциплины (review #5): повторное начисление тем же ключом — no-op; если
+  существующее событие с другими `points` — расхождение логируется (ledger не молчит).
+- Кодекс: `codex_rules` (5 принципов) — сид миграции 004: `risk_moved` (Снаряжение дороже
+  артефакта), `no_journal_entry` (Каждая вылазка — урок), `no_setup` (Зона не обещает),
+  `no_disclosure` (Тишина — признак опасности), `overtrade` (Сталкер не бросает своих).
+- Глобальный exception-filter: ВСЕ ошибки — единый контракт `{error: "<code>"}` (review #10),
+  включая nest-дефолты (404 маршрута → `not_found`, битый JSON-body → `invalid_request`).
+- Guard-отказы (401/403 без заголовка / битая подпись / неизвестный юзер / blocked) —
+  в `audit_log` с деталями (review #4).
+- Health: `GET /api/v1/health` → `{"status":"ok","db":"ok"}`; БД лежит → `503 db_unavailable`.
+
+Полный флоу нед2 одной командой (нужен запущенный `npm run dev`):
+`PGDATABASE=stalker_lab scripts/flow-week2.sh` — auth → entry → trade (чистый + с
+нарушением) → 409-дубль → review → 403-в-закрытую → `/me/stats` = 5+5+3=13.
+
+Известный трейд-офф MVP: у `POST /trades` нет клиентского идемпотентного ключа — сетевой
+ретрай может задвоить сделку (баллы дисциплины при этом НЕ дублируются, каждая строка
+сделки — отдельное событие). Идемпотентный ключ — кандидат в нед3+.
+
 ## Структура (module-per-domain)
 
 ```
@@ -82,12 +116,12 @@ src/
   modules/
     identity/              # POST /api/v1/auth/telegram, GET /api/v1/me
     invites/               # одноразовые коды: consume в tx, create (CLI)
-    journal/               # скелет нед2: схема в миграциях, эндпоинты 501
-    discipline/            # awardDisciplinePoints(): ledger, идемпотентно
-    health/                # GET /api/v1/health
-migrations/                # 001_identity, 002_journal, 003_discipline
-scripts/                   # migrate.ts (runner), make-invite.ts (CLI)
-test/                      # auth.e2e.test.ts, discipline.test.ts (jest, runInBand)
+    journal/               # нед2: entries/trades/review + дисциплина в tx
+    discipline/            # awardDisciplinePoints() ledger + GET /me/stats + инвариант
+    health/                # GET /api/v1/health (+SELECT 1)
+migrations/                # 001_identity, 002_journal, 003_discipline, 004_journal_week2
+scripts/                   # migrate.ts, make-invite.ts, flow-week2.sh (демо-флоу нед2)
+test/                      # auth.e2e, journal.e2e, discipline (jest, runInBand)
 ```
 
 ## Правила недели 1
@@ -97,5 +131,8 @@ test/                      # auth.e2e.test.ts, discipline.test.ts (jest, runInBa
 - **Stateless**: без сессий/токенов, initData проверяется на каждый запрос (обмен на
   токен — V1).
 - **Дисциплина — ledger-only**: `UNIQUE(user_id,event_type,ref_type,ref_id)` +
-  `ON CONFLICT DO NOTHING`; повторное начисление — no-op.
-- Деплой не входит в неделю 1 (деплоит владелец).
+  `ON CONFLICT DO NOTHING`; повторное начисление — no-op; расхождение points при
+  повторе — лог-инвариант.
+- **Журнал — источник дисциплины** (нед2): entry +5 / trade +5 (без нарушения) / review +3,
+  начисление в той же tx, что и запись журнала.
+- Деплой не входит в недели 1–2 (деплоит владелец).

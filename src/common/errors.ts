@@ -10,11 +10,18 @@ export class ApiError extends HttpException {
 
 export const errors = {
   invalidRequest: () => new ApiError(400, 'invalid_request'),
+  unknownViolationCode: () => new ApiError(400, 'unknown_violation_code'),
   unauthenticated: () => new ApiError(401, 'unauthenticated'),
   invalidInitData: () => new ApiError(401, 'invalid_init_data'),
   userNotFound: () => new ApiError(401, 'user_not_found'),
   inviteRequired: () => new ApiError(403, 'invite_required'),
   blocked: () => new ApiError(403, 'blocked'),
+  forbidden: () => new ApiError(403, 'forbidden'),
+  entryClosed: () => new ApiError(403, 'entry_closed'),
+  entryAlreadyClosed: () => new ApiError(409, 'entry_closed'), // PATCH повторного закрытия
   rateLimited: () => new ApiError(429, 'rate_limited'),
+  notFound: () => new ApiError(404, 'not_found'),
+  entryExists: () => new ApiError(409, 'entry_exists'),
   notImplemented: () => new ApiError(501, 'not_implemented'),
+  dbUnavailable: () => new ApiError(503, 'db_unavailable'),
 };

@@ -155,17 +155,84 @@ it('GET /api/v1/me: с initData в заголовке → 200 юзер; без �
   expect(anon.status).toBe(401);
 });
 
-it('journal-заглушки под auth → 501 not_implemented', async () => {
+it('GET /api/v1/journal/entries (нед2 реализован): без тела → 200 пустой список своих', async () => {
   const code = await createInviteCode(db, null, 1);
   const initData = signInitData(tgUserJson(101_011));
   await postAuth(initData, code, freshIp());
   const res = await fetch(`${base}/api/v1/journal/entries`, { headers: { 'x-telegram-init-data': initData } });
-  expect(res.status).toBe(501);
-  expect(((await res.json()) as { error: string }).error).toBe('not_implemented');
+  expect(res.status).toBe(200);
+  expect(((await res.json()) as { entries: unknown[] }).entries).toEqual([]);
 });
 
-it('GET /api/v1/health → 200 {status:"ok"}', async () => {
+// --- guard-отказы в audit_log (review #4) ---
+
+it('guard-отказы пишутся в audit: нет заголовка / битая подпись / неизвестный юзер', async () => {
+  // нет заголовка → 401 + audit
+  const no = await fetch(`${base}/api/v1/me`);
+  expect(no.status).toBe(401);
+  // битая подпись → 401 + audit
+  const good = signInitData(tgUserJson(101_012));
+  const tampered = good.slice(0, -4) + 'cafe';
+  const bad = await fetch(`${base}/api/v1/me`, { headers: { 'x-telegram-init-data': tampered } });
+  expect(bad.status).toBe(401);
+  // валидная подпись, но юзер не регистрировался → 401 user_not_found + audit с tg-id
+  const ghost = signInitData(tgUserJson(101_013));
+  const nf = await fetch(`${base}/api/v1/me`, { headers: { 'x-telegram-init-data': ghost } });
+  expect(nf.status).toBe(401);
+  expect(((await nf.json()) as { error: string }).error).toBe('user_not_found');
+
+  const audit = await db.query<{ detail: string }>(
+    `SELECT detail FROM audit_log WHERE action = 'auth_fail' AND detail LIKE 'guard_%' ORDER BY id`,
+  );
+  const details = audit.rows.map((r) => r.detail);
+  expect(details).toContain('guard_no_init_data');
+  expect(details).toContain('guard_bad_init_data');
+  expect(details.some((d) => d.startsWith('guard_user_not_found tg='))).toBe(true);
+});
+
+it('заблокированный юзер: guard → 403 blocked + audit с user_id', async () => {
+  const code = await createInviteCode(db, null, 1);
+  const initData = signInitData(tgUserJson(101_014));
+  await postAuth(initData, code, freshIp());
+  const u = await db.query('SELECT id FROM users WHERE telegram_id = $1', [101_014]);
+  await db.query('UPDATE users SET is_blocked = TRUE WHERE id = $1', [u.rows[0].id]);
+
+  const res = await fetch(`${base}/api/v1/me`, { headers: { 'x-telegram-init-data': initData } });
+  expect(res.status).toBe(403);
+  expect(((await res.json()) as { error: string }).error).toBe('blocked');
+  const audit = await db.query(
+    `SELECT 1 FROM audit_log WHERE action = 'auth_fail' AND user_id = $1 AND detail = 'guard_blocked'`,
+    [u.rows[0].id],
+  );
+  expect(audit.rowCount).toBe(1);
+});
+
+// --- exception-filter: единый контракт {error: code} (review #10) ---
+
+it('битый JSON-body → 400 {error:"invalid_request"} (не nest-дефолт)', async () => {
+  const res = await fetch(`${base}/api/v1/auth/telegram`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{"initData": "oops',
+  });
+  expect(res.status).toBe(400);
+  expect(((await res.json()) as Record<string, unknown>).error).toBe('invalid_request');
+});
+
+it('неизвестный маршрут → 404 {error:"not_found"}; чужой метод → 405 {error:"method_not_allowed"}', async () => {
+  const miss = await fetch(`${base}/api/v1/nope`);
+  expect(miss.status).toBe(404);
+  expect(((await miss.json()) as Record<string, unknown>).error).toBe('not_found');
+
+  const wrong = await fetch(`${base}/api/v1/health`, { method: 'POST' });
+  expect([404, 405]).toContain(wrong.status); // nest-роутер: нет POST-маршрута
+  if (wrong.status === 405) {
+    expect(((await wrong.json()) as Record<string, unknown>).error).toBe('method_not_allowed');
+  }
+});
+
+it('GET /api/v1/health → 200 {status:"ok", db:"ok"} (SELECT 1 прошёл)', async () => {
   const res = await fetch(`${base}/api/v1/health`);
   expect(res.status).toBe(200);
-  expect(((await res.json()) as { status: string }).status).toBe('ok');
+  expect(await res.json()).toEqual({ status: 'ok', db: 'ok' });
 });

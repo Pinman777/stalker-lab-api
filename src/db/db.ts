@@ -9,7 +9,7 @@ const pool = config.databaseUrl
 
 /** Минимальный интерфейс исполнителя SQL: ему удовлетворяют и db, и клиент транзакции. */
 export interface Executor {
-  query(text: string, params?: unknown[]): Promise<QueryResult<QueryResultRow>>;
+  query<T extends QueryResultRow = QueryResultRow>(text: string, params?: unknown[]): Promise<QueryResult<T>>;
 }
 
 export interface DbClient extends Executor {

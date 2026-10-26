@@ -1,5 +1,5 @@
 import { db } from '../src/db/db';
-import { awardDisciplinePoints } from '../src/modules/discipline/discipline.service';
+import { awardDisciplinePoints, getDisciplineStats } from '../src/modules/discipline/discipline.service';
 import { ensureTestDb, resetSchema } from './helpers';
 
 /** Дисциплина (нед1, задача 5): идемпотентность начисления по UNIQUE-ключу. */
@@ -44,4 +44,39 @@ it('другой ref_id → отдельное событие (applied=true)', a
   expect(r.applied).toBe(true);
   const stats = await db.query<{ cnt: number }>('SELECT count(*)::int AS cnt FROM discipline_events');
   expect(stats.rows[0].cnt).toBe(2);
+});
+
+it('инвариант (review #5): ретрай с ДРУГИМ points → applied=false, событие не изменено, расхождение залогировано', async () => {
+  const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const retry = await awardDisciplinePoints(db, {
+      userId,
+      eventType: 'journal_violation',
+      refType: 'journal_trade',
+      refId: 42, // существует с points=-2
+      points: 99,
+    });
+    expect(retry.applied).toBe(false);
+    // событие не перезаписано и сумма не изменилась
+    const ev = await db.query<{ points: number }>(
+      'SELECT points FROM discipline_events WHERE user_id = $1 AND ref_id = 42',
+      [userId],
+    );
+    expect(ev.rows[0].points).toBe(-2);
+    // лог-инвариант о расхождении
+    expect(spy).toHaveBeenCalled();
+    const logged = spy.mock.calls.map((c) => String(c[0])).join(' ');
+    expect(logged).toContain('discipline invariant');
+    expect(logged).toContain('stored=-2');
+    expect(logged).toContain('attempted=99');
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+it('getDisciplineStats: суммы и разбивка по event_type', async () => {
+  const s = await getDisciplineStats(db, userId); // -2 (42) + -2 (43) = -4
+  expect(s.points).toBe(-4);
+  expect(s.events).toBe(2);
+  expect(s.byType.journal_violation).toEqual({ events: 2, points: -4 });
 });
