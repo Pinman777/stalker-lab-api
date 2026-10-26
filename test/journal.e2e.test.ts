@@ -65,8 +65,16 @@ async function stats(user: User): Promise<Record<string, any>> {
   return r.body!;
 }
 
-const D1 = '2030-01-15';
-const D2 = '2030-01-16';
+/** Даты — динамические (нед3-фикс: будущее дальше tomorrow UTC клампится 400-й),
+ *  поэтому сессии создаём в прошлом — прошлое свободно. */
+function utcDate(offsetDays: number): string {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + offsetDays))
+    .toISOString()
+    .slice(0, 10);
+}
+const D1 = utcDate(-10);
+const D2 = utcDate(-9);
 
 beforeAll(async () => {
   await ensureTestDb();
@@ -115,8 +123,8 @@ it('вторая сессия в тот же день → 409 entry_exists, ду
 it('битый body (нет plan / кривая дата / 31 февраля) → 400 invalid_request', async () => {
   const u = await newUser();
   expect((await call('POST', '/api/v1/journal/entries', u, { date: D1 })).status).toBe(400);
-  expect((await call('POST', '/api/v1/journal/entries', u, { date: '2030-1-5', plan: 'x' })).status).toBe(400);
-  expect((await call('POST', '/api/v1/journal/entries', u, { date: '2030-02-31', plan: 'x' })).status).toBe(400);
+  expect((await call('POST', '/api/v1/journal/entries', u, { date: '2026-1-5', plan: 'x' })).status).toBe(400); // формат
+  expect((await call('POST', '/api/v1/journal/entries', u, { date: '2026-02-31', plan: 'x' })).status).toBe(400); // календарь
   expect((await call('POST', '/api/v1/journal/entries', u, { date: D1, plan: '   ' })).status).toBe(400);
 });
 
@@ -285,24 +293,25 @@ it('PATCH без status:closed → 400 (другие переходы не по�
 it('список: только свои, от новых к старым, tradesCount; from/to фильтруют включительно', async () => {
   const u1 = await newUser();
   const u2 = await newUser();
-  await call('POST', '/api/v1/journal/entries', u1, { date: '2030-03-01', plan: 'c' });
-  const mid = (await call('POST', '/api/v1/journal/entries', u1, { date: '2030-03-10', plan: 'b' })).body!.entry.id;
-  await call('POST', '/api/v1/journal/entries', u1, { date: '2030-03-20', plan: 'a' });
+  const d1 = utcDate(-30), d10 = utcDate(-20), d20 = utcDate(-10), dOther = utcDate(-25);
+  await call('POST', '/api/v1/journal/entries', u1, { date: d1, plan: 'c' });
+  const mid = (await call('POST', '/api/v1/journal/entries', u1, { date: d10, plan: 'b' })).body!.entry.id;
+  await call('POST', '/api/v1/journal/entries', u1, { date: d20, plan: 'a' });
   await call('POST', `/api/v1/journal/entries/${mid}/trades`, u1, { sym: 'X', dir: 'long', entry: 1, stop: 0.5, exit: 2 });
-  await call('POST', '/api/v1/journal/entries', u2, { date: '2030-03-15', plan: 'чужой день' });
+  await call('POST', '/api/v1/journal/entries', u2, { date: dOther, plan: 'чужой день' });
 
   const all = await call('GET', '/api/v1/journal/entries', u1);
   expect(all.status).toBe(200);
-  expect(all.body!.entries.map((x: any) => x.date)).toEqual(['2030-03-20', '2030-03-10', '2030-03-01']); // DESC
+  expect(all.body!.entries.map((x: any) => x.date)).toEqual([d20, d10, d1]); // DESC
   expect(all.body!.entries.find((x: any) => x.id === mid).tradesCount).toBe(1);
 
-  const ranged = await call('GET', '/api/v1/journal/entries?from=2030-03-05&to=2030-03-15', u1);
-  expect(ranged.body!.entries.map((x: any) => x.date)).toEqual(['2030-03-10']);
+  const ranged = await call('GET', `/api/v1/journal/entries?from=${utcDate(-25)}&to=${utcDate(-15)}`, u1);
+  expect(ranged.body!.entries.map((x: any) => x.date)).toEqual([d10]);
 
-  const fromOnly = await call('GET', '/api/v1/journal/entries?from=2030-03-10', u1);
-  expect(fromOnly.body!.entries.map((x: any) => x.date)).toEqual(['2030-03-20', '2030-03-10']);
+  const fromOnly = await call('GET', `/api/v1/journal/entries?from=${d10}`, u1);
+  expect(fromOnly.body!.entries.map((x: any) => x.date)).toEqual([d20, d10]);
 
-  expect((await call('GET', '/api/v1/journal/entries?from=2030-03-15&to=2030-03-05', u1)).status).toBe(400); // from > to
+  expect((await call('GET', `/api/v1/journal/entries?from=${d20}&to=${d10}`, u1)).status).toBe(400); // from > to
   expect((await call('GET', '/api/v1/journal/entries?from=knock-knock', u1)).status).toBe(400);
 });
 

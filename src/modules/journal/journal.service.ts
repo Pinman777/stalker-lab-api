@@ -122,7 +122,10 @@ async function classifyEntryMiss(
 
 @Injectable()
 export class JournalService {
-  /** POST /entries: сессия дня + journal_entry(+5) — атомарно. Дубль дня → 409 entry_exists. */
+  /** POST /entries: сессия дня + journal_entry(+5) — атомарно. Дубль дня → 409 entry_exists.
+   *  КАНОН ДНЯ ДЛЯ ДИСЦИПЛИНЫ (решение ревью нед2, п.4): днём события считается entry.date —
+   *  день, заданный юзером при создании сессии, а НЕ created_at: дебриф задним числом
+   *  относится к дню вылазки, и баллы относятся к тому же дню. Кнопка здесь, день — из данных. */
   async createEntry(userId: string, date: string, plan: string): Promise<EntryDto> {
     return db.tx(async (c) => {
       let row: EntryRow;
@@ -198,8 +201,13 @@ export class JournalService {
     return toEntryDto(row);
   }
 
-  /** POST /entries/:id/trades: только в свою ОТКРЫТУЮ сессию. Атомарный INSERT..SELECT:
-   *  status='draft' проверяется в том же утверждении — гонка «trade против закрытия» исключена.
+  /** POST /entries/:id/trades: только в свою ОТКРЫТУЮ сессию.
+   *  Фикс ревью нед2 (п.1): перед INSERT — SELECT ... FOR SHARE на строке сессии.
+   *  Атомарного INSERT..SELECT хватало против «вставки в уже закрытую», но закрытие,
+   *  стартовавшее между snapshot-ом INSERT и его коммитом, могло пройти «сквозь» сделку.
+   *  SHARE-лок выстраивает порядок: либо сделка коммитится раньше закрытия (валидна),
+   *  либо закрытие коммитится первым — и SELECT уже не видит status='draft' (EvalPlanQual
+   *  перепроверяет предикат после ожидания лока).
    *  Сделка с violation_code: БЕЗ баллов, нарушение — в audit (после коммита). */
   async addTrade(userId: string, entryId: number, t: TradeInput, ip: string): Promise<TradeDto> {
     if (t.violationCode) {
@@ -208,16 +216,19 @@ export class JournalService {
     }
 
     const row = await db.tx(async (c) => {
-      const r = await c.query<TradeRow>(
-        `INSERT INTO journal_trades (entry_id, sym, dir, entry, stop, exit, r, setup, violation_code)
-         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
-         WHERE EXISTS (SELECT 1 FROM journal_entries WHERE id = $1 AND user_id = $10 AND status = 'draft')
-         RETURNING *`,
-        [entryId, t.sym, t.dir, t.entry, t.stop, t.exit, t.r, t.setup, t.violationCode, userId],
+      const lock = await c.query(
+        `SELECT 1 FROM journal_entries WHERE id = $1 AND user_id = $2 AND status = 'draft' FOR SHARE`,
+        [entryId, userId],
       );
-      if (!r.rowCount) {
+      if (!lock.rowCount) {
         await classifyEntryMiss(c, entryId, userId, () => errors.entryClosed()); // throws
       }
+      const r = await c.query<TradeRow>(
+        `INSERT INTO journal_trades (entry_id, sym, dir, entry, stop, exit, r, setup, violation_code)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [entryId, t.sym, t.dir, t.entry, t.stop, t.exit, t.r, t.setup, t.violationCode],
+      );
       const trade = r.rows[0];
       if (!t.violationCode) {
         await awardDisciplinePoints(c, {

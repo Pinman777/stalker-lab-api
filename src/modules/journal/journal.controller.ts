@@ -60,6 +60,17 @@ function parseDate(s: unknown): string {
   return s;
 }
 
+/** Фикс ревью нед2 → нед3 (п.3): дата вылазки — не дальше завтрашнего дня (UTC).
+ *  +1d — допуск на таймзону клиента (у нас день канонизирован как entry.date, см. сервис).
+ *  Прошлые даты свободны: дебриф задним числом — легальный флоу, «планы на послезавтра» — нет. */
+function assertNotFarFuture(date: string): void {
+  const now = new Date();
+  const tomorrowUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1))
+    .toISOString()
+    .slice(0, 10);
+  if (date > tomorrowUtc) throw errors.invalidRequest();
+}
+
 function parseText(v: unknown, max: number): string {
   if (typeof v !== 'string') throw errors.invalidRequest();
   const s = v.trim();
@@ -75,7 +86,9 @@ function parseId(id: string): number {
 function parseCreateEntryBody(body: unknown): { date: string; plan: string } {
   if (typeof body !== 'object' || body === null) throw errors.invalidRequest();
   const b = body as Record<string, unknown>;
-  return { date: parseDate(b.date), plan: parseText(b.plan, 4000) };
+  const date = parseDate(b.date);
+  assertNotFarFuture(date); // будущее клампим, прошлое свободно (ревью нед2, п.3)
+  return { date, plan: parseText(b.plan, 4000) };
 }
 
 function parseCloseEntryBody(body: unknown): { review: string } {

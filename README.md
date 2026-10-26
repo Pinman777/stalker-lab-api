@@ -79,8 +79,8 @@ initData (±24ч) → `401 {"error":"invalid_init_data"}`; 6-я попытка �
 | `GET /api/v1/journal/entries/:id` | сессия + её `trades` | — |
 | `GET /api/v1/me/stats` | `{points, events, byType}` из discipline-ledger | — |
 
-- Гонки закрыты атомарными условными UPDATE/INSERT..SELECT (`status='draft'` в том же
-  утверждении): «trade против закрытия» и «двойное закрытие» не проходят.
+- Гонки закрыты атомарными условными UPDATE и `SELECT … FOR SHARE` перед INSERT сделки
+  (нед3-фикс): «trade против закрытия» и «двойное закрытие» не проходят.
 - Инвариант дисциплины (review #5): повторное начисление тем же ключом — no-op; если
   существующее событие с другими `points` — расхождение логируется (ledger не молчит).
 - Кодекс: `codex_rules` (5 принципов) — сид миграции 004: `risk_moved` (Снаряжение дороже
@@ -100,6 +100,57 @@ initData (±24ч) → `401 {"error":"invalid_init_data"}`; 6-я попытка �
 ретрай может задвоить сделку (баллы дисциплины при этом НЕ дублируются, каждая строка
 сделки — отдельное событие). Идемпотентный ключ — кандидат в нед3+.
 
+## Академия (неделя 3) — курс из книги
+
+Курс `kodex` = 11 глав книги «Кодекс рыночного сталкера»: текст главы с полевыми
+заметками = `body_md`, «Проверь себя» = квиз (3 вопроса × 3 варианта). Контент-сид —
+миграция `006_academy_seed.sql` (сгенерирована `scripts/build-academy-seed.ts` из
+глав-черновиков; регенерация перезапишет файл).
+
+Все эндпоинты за `x-telegram-init-data`; локаль `?lang=ru|en` (default `ru`), en без
+перевода фолбэчит на ru пер-полево (`lesson_translations`, i18n с первого дня).
+
+| Endpoint | Что делает |
+|---|---|
+| `GET /api/v1/academy/courses?lang=` | `[{slug, title, lessons: [{ord, slug, title, passed}]}]` |
+| `GET /api/v1/academy/lessons/:slug?lang=` | `{slug, ord, title, body_md, quiz: [{question, options[3]}], passed}` — **без поля-ответа** |
+| `POST /api/v1/academy/lessons/:slug/quiz` `{question: 0..2, answer: 0..2}` | ответ на один вопрос → `{correct, explanation?, passed}` |
+| `GET /api/v1/academy/progress` | `{passed_lessons: [slug…], points}` |
+
+- **Лестница книги**: урок N+1 недоступен (и контент, и квиз), пока не пройден N →
+  `403 lesson_locked`. Первый урок открыт всегда.
+- Урок пройден = **верных ≥ 2 из 3** вопросов (верные копятся в `lesson_progress.quiz_state`,
+  неверный можно переспросить) → `academy_lesson` **+20** в discipline-ledger, идемпотентно.
+- Пояснение (`explanation`) отдаётся только к верному ответу — не подсказываем.
+
+## Рефералка (неделя 3) — анти-MLM
+
+Только счётчики приглашённых. Никаких оборотов, комиссий, процентов — в ответах их
+физически нет.
+
+| Endpoint | Что делает |
+|---|---|
+| `POST /api/v1/referrals/invite` | свой код `{code: "r_"+8 символов}`; **лимит 3 активных** (не погашенных) → `409 invite_limit_reached`; ранг вырастет — лимит вырастет |
+| `GET /api/v1/referrals` | `{invited: [{username?, first_name?, joined_at, is_active_journal}], count}` — только свои |
+
+Реферальный бейдж: вход НОВОГО юзера по коду юзера X (`created_by` кода) → строка в
+`referrals` (атомарно в tx создания аккаунта; `UNIQUE(invited_uid)` — у приглашённого
+ровно один реферер). CLI/бутстрап-коды (`created_by IS NULL`) привязку не создают.
+`is_active_journal` = была хоть одна запись в журнале.
+
+## Фиксы ревью нед2 (закрыты в нед3)
+
+1. **trade против закрытия**: перед `INSERT` сделки — `SELECT … WHERE status='draft' FOR SHARE`:
+   tx сделки держит SHARE-лок на строке сессии, параллельное закрытие ждёт коммита —
+   «закрытие сквозь сделку» невозможно (раньше был только атомарный INSERT..SELECT,
+   не закрывавший окно между snapshot и коммитом).
+2. **guard-отказы через authRateLimiter** (общий с `/auth`): спам-поток с одного IP после
+   исчерпания лимита получает `429` БЕЗ audit-записи — audit_log не заливается.
+3. **clamp будущей даты**: `date > today+1d (UTC)` → `400 invalid_request` (допуск +1d на
+   таймзону клиента); прошлые даты свободны — дебриф задним числом легален.
+4. **Канон дня дисциплины** (зафиксировано в коде): день события = `entry.date`, который
+   задал юзер, а не `created_at`.
+
 ## Структура (module-per-domain)
 
 ```
@@ -114,14 +165,18 @@ src/
     guards/tma-auth.guard.ts  # stateless per-request: заголовок x-telegram-init-data
     errors.ts, audit.ts, ip.ts
   modules/
-    identity/              # POST /api/v1/auth/telegram, GET /api/v1/me
-    invites/               # одноразовые коды: consume в tx, create (CLI)
-    journal/               # нед2: entries/trades/review + дисциплина в tx
+    identity/              # POST /api/v1/auth/telegram, GET /api/v1/me (+ реферальная привязка в tx)
+    invites/               # одноразовые коды: consume в tx (возвращает created_by), create (CLI)
+    journal/               # нед2: entries/trades/review + дисциплина в tx; нед3: FOR SHARE-фикс
     discipline/            # awardDisciplinePoints() ledger + GET /me/stats + инвариант
+    academy/               # нед3: курс kodex из книги, квизы, лестница уроков
+    referrals/             # нед3: r_-инвайты юзера + список приглашённых (только счётчики)
     health/                # GET /api/v1/health (+SELECT 1)
-migrations/                # 001_identity, 002_journal, 003_discipline, 004_journal_week2
-scripts/                   # migrate.ts, make-invite.ts, flow-week2.sh (демо-флоу нед2)
-test/                      # auth.e2e, journal.e2e, discipline (jest, runInBand)
+migrations/                # 001_identity … 005_academy, 006_academy_seed, 007_referrals
+scripts/                   # migrate.ts, make-invite.ts, build-academy-seed.ts,
+                           # flow-week2.sh, flow-week3.sh (демо-флоу)
+test/                      # auth.e2e, journal.e2e, discipline, academy.e2e, referrals.e2e,
+                           # week3-fixes (jest, runInBand — файлы делят одну тест-БД)
 ```
 
 ## Правила недели 1

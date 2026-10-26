@@ -7,6 +7,7 @@ import { db } from '../../db/db';
 import { config } from '../../config';
 import { findUserByTelegramId, insertUser, toUserDto, type UserDto, type UserRow } from './users.repository';
 import { InvitesService } from '../invites/invites.service';
+import { insertReferral } from '../referrals/referrals.service';
 
 export interface AuthResult {
   user: UserDto;
@@ -53,7 +54,8 @@ export class IdentityService {
       throw errors.inviteRequired();
     }
 
-    // Новый юзер: аккаунт + погашение инвайта атомарны; битый/чужой код → rollback, аккаунта-сироты нет.
+    // Новый юзер: аккаунт + погашение инвайта (+ реферальная привязка, нед3) атомарны;
+    // битый/чужой код → rollback, аккаунта-сироты нет.
     // tx возвращает UserRow ЛИБО маркер «уже создан параллельным запросом» (review #3).
     const ALREADY = Symbol('already-created');
     let user: UserRow;
@@ -71,7 +73,12 @@ export class IdentityService {
           throw e;
         }
         const consumed = await this.invites.consume(c, inviteCode, u.id);
-        if (!consumed) throw errors.inviteRequired();
+        if (!consumed.ok) throw errors.inviteRequired();
+        // Реферальный бейдж (нед3): вход по коду юзера X → привязка к X в той же tx.
+        // CLI/бутстрап-коды (created_by NULL) привязки не создают; самоприглашение исключено.
+        if (consumed.referrerUid && consumed.referrerUid !== String(u.id)) {
+          await insertReferral(c, String(u.id), consumed.referrerUid, inviteCode);
+        }
         return u;
       });
       if (res === ALREADY) {
