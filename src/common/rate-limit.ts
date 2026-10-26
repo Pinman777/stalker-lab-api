@@ -24,6 +24,12 @@ export class SlidingWindowRateLimiter {
     this.hits.set(key, fresh);
     return true;
   }
+
+  /** Сброс состояния (тесты: truncateAll даёт юзерам повторяющиеся id — ключи
+   *  «наследуют» историю прошлых тестов внутри одного 60-сек окна). */
+  reset(): void {
+    this.hits.clear();
+  }
 }
 
 /** Auth-эндпоинт: 5 попыток/мин/IP — защита от brute-force инвайт-кодов (нед1, задача 3). */

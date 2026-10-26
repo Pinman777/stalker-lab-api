@@ -1,0 +1,32 @@
+/** GET /api/v1/connections/bingx/guide — пошаговая инструкция привязки для фронта.
+ *  Статический JSON (меняется только с релизом): BingX не даёт API для генерации
+ *  ключей, юзер создаёт ключ руками — ключ с правом ТОЛЬКО Read, без Withdraw. */
+export interface GuideStep {
+  n: number;
+  title: string;
+  detail: string;
+}
+
+export interface BingxBindGuide {
+  venue: 'bingx';
+  steps: GuideStep[];
+  warnings: string[];
+}
+
+export const BINGX_GUIDE: BingxBindGuide = {
+  venue: 'bingx',
+  steps: [
+    { n: 1, title: 'Открой BingX', detail: 'В приложении или на bingx.com войди в аккаунт, с которым торгуешь.' },
+    { n: 2, title: 'Аватар → API Management', detail: 'Тапни аватар профиля (правый верхний угол) → раздел «API Management» (Управление API).' },
+    { n: 3, title: 'Create API', detail: 'Нажми «Create API» (Создать API-ключ). Подтверди по почте/2FA, если попросит.' },
+    { n: 4, title: 'Права — ТОЛЬКО Read', detail: 'В настройках ключа отметь только разрешение «Read» (чтение). Никаких торговых прав не нужно.' },
+    { n: 5, title: 'Без Withdraw', detail: 'Разрешение «Withdraw» (вывод средств) должно быть ВЫКЛЮЧЕНО. Ключ с правом вывода не привязывай.' },
+    { n: 6, title: 'Скопируй ключи', detail: 'Скопируй API Key и Secret Key сразу — Secret показывается один раз при создании.' },
+    { n: 7, title: 'Вставь в Stalker Lab', detail: 'Вставь оба значения в форму привязки и нажми «Привязать» — мы проверим ключ живым запросом баланса.' },
+  ],
+  warnings: [
+    'Secret Key виден только при создании — если потерял, создай новый ключ.',
+    'Ключ хранится зашифрованным (AES-256-GCM) и используется только для чтения истории сделок.',
+    'Совет: добавь IP-адрес сервера Stalker Lab в белый список ключа, если BingX его предлагает.',
+  ],
+};

@@ -2,7 +2,7 @@ import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from
 import { TmaAuthGuard } from '../../common/guards/tma-auth.guard';
 import { errors } from '../../common/errors';
 import { getIp } from '../../common/ip';
-import { JournalService, type EntryDto, type TradeDto, type TradeInput } from './journal.service';
+import { JournalService, type AutoTradeDto, type EntryDto, type TradeDto, type TradeInput } from './journal.service';
 import type { AuthedRequest } from '../../common/authed-request';
 
 /** Журнал (нед2 — ядро продукта): сессия-вылазка на день + сделки + разбор.
@@ -46,6 +46,18 @@ export class JournalController {
     const t = parseTradeBody(body);
     const trade = await this.journal.addTrade(req.user!.id, parseId(id), t, getIp(req));
     return { trade };
+  }
+
+  /** Авто-сделки (нед4): импорт из биржевых подключений. Только чтение — факты и
+   *  статистика, баллов дисциплины за них НЕТ (идеология, см. journal.service). */
+  @Get('auto')
+  async listAuto(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Req() req?: AuthedRequest,
+  ): Promise<{ trades: AutoTradeDto[] }> {
+    const range = parseDateRange(from, to);
+    return { trades: await this.journal.listAutoTrades(req!.user!.id, range.from, range.to) };
   }
 }
 

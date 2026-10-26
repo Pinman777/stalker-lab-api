@@ -138,6 +138,47 @@ initData (±24ч) → `401 {"error":"invalid_init_data"}`; 6-я попытка �
 ровно один реферер). CLI/бутстрап-коды (`created_by IS NULL`) привязку не создают.
 `is_active_journal` = была хоть одна запись в журнале.
 
+## Автожурнал (неделя 4) — killer-фича: «сделки добавляются сами»
+
+Привязка ключа BingX (Read-only) → авто-импорт закрытых позиций за 7 дней → факты в
+журнале без единого клика.
+
+> **ИДЕОЛОГИЯ (TMM/IZ-паттерн): АВТО-СДЕЛКИ НЕ ДАЮТ БАЛЛОВ ДИСЦИПЛИНЫ.**
+> Баллы — за план (+5), ручную запись сделки (+5), разбор (+3): осознанная дисциплина.
+> Авто-импорт — только ФАКТЫ и СТАТИСТИКА (`auto_trades_count`, `auto_pnl_sum` в
+> /me/stats отдельными полями). Синк никогда не пишет в `discipline_events`
+> (зафиксировано в миграции 008 и connections.service).
+
+| Endpoint | Что делает |
+|---|---|
+| `GET /api/v1/connections/bingx/guide` | пошаговый гайд привязки для фронта (7 шагов, права **Read**, без Withdraw) |
+| `POST /api/v1/connections/bingx/bind` `{apiKey, apiSecret, replace?}` | ключ проверяется живым `GET /user/balance` → код≠0 = `403 invalid_api_key`; секрет → AES-256-GCM (env `CONN_ENC_KEY`, scrypt+случайный salt, AAD=apiKey); дубль venue → `409 connection_exists` (или `replace:true`); ответ `{venue, masked, bound_at}` |
+| `POST /api/v1/connections/bingx/unbind` | снос подключения (авто-сделки каскадом) |
+| `POST /api/v1/connections/bingx/sync` | импорт закрытых позиций за 7 дней: символы находятся через `/user/income` (USDT+USDC), по каждому — `positionHistory` (только `closeAllPositions`); идемпотентен `UNIQUE(connection_id, exchange_ref)` |
+| `GET /api/v1/connections` | `[{venue, masked, bound_at, last_sync_at}]` |
+| `GET /api/v1/journal/auto?from&to` | авто-сделки юзера (фильтр по дате закрытия) |
+| `GET /api/v1/me/stats` | + `auto_trades_count`, `auto_pnl_sum` (баллы НЕ трогает) |
+
+Всё за TmaAuthGuard; rate-limit 10 действий/мин на юзера + audit (`bingx_bind`,
+`bingx_bind_fail`, `bingx_unbind`, `bingx_sync`, `bingx_sync_fail`).
+
+**Интеграция BingX — сверено с официальными доками (bingx-api.github.io) и живыми
+запросами 2026-10**, реализовано канонически:
+
+- Домен `open-api.bingx.com` (НЕ open-api-swap).
+- Подпись v2: все параметры + `timestamp` (ms), ASCII-сортировка ключей →
+  `HmacSHA256(apiSecret, "k=v&k=v")` → hex в query-параметре `signature`,
+  заголовок `X-BX-APIKEY`. (Схема `timestamp+GET+path+qs` из ранних ТЗ доками
+  не подтверждена; проверена живым запросом к real API — формат принят.)
+- Закрытые позиции: `GET /openApi/swap/v2/trade/positionHistory` — путь
+  `/user/positionsHistory` НЕ существует (live: `100400 this api is not exist`).
+  `symbol` обязателен; пагинация `pageIndex` от 0 + `pageSize` (≤1000);
+  окно `startTime/endTime` ≤ 90 дней. `positionId` — BIGINT-строка
+  (> `MAX_SAFE_INTEGER`, не `Number()`); время закрытия = `updateTime`.
+- Секреты: AES-256-GCM из node `crypto` (без новых зависимостей), формат
+  `v1:salt:iv:tag:ct`; без `CONN_ENC_KEY` сервис падает на старте с понятной ошибкой.
+- Мок для флоу: `scripts/bingx-mock.js` (сам проверяет подпись) + `scripts/flow-week4.sh`.
+
 ## Фиксы ревью нед2 (закрыты в нед3)
 
 1. **trade против закрытия**: перед `INSERT` сделки — `SELECT … WHERE status='draft' FOR SHARE`:
@@ -157,7 +198,7 @@ initData (±24ч) → `401 {"error":"invalid_init_data"}`; 6-я попытка �
 src/
   main.ts                  # только бутстрап
   app.module.ts            # импорт доменов + shutdown (закрытие пула pg)
-  config.ts                # env: BOT_TOKEN, PORT, DATABASE_URL
+  config.ts                # env: BOT_TOKEN, PORT, DATABASE_URL (+ CONN_ENC_KEY, BINGX_API_BASE — нед4)
   db/db.ts                 # raw pg pool + tx (канон invest-pool/src/db.ts)
   common/
     tg-auth.ts             # verifyInitData: HMAC-SHA256, freshness ±24ч, timing-safe (канон tgAuth.ts)
@@ -167,16 +208,18 @@ src/
   modules/
     identity/              # POST /api/v1/auth/telegram, GET /api/v1/me (+ реферальная привязка в tx)
     invites/               # одноразовые коды: consume в tx (возвращает created_by), create (CLI)
-    journal/               # нед2: entries/trades/review + дисциплина в tx; нед3: FOR SHARE-фикс
-    discipline/            # awardDisciplinePoints() ledger + GET /me/stats + инвариант
+    journal/               # нед2: entries/trades/review + дисциплина в tx; нед3: FOR SHARE-фикс; нед4: GET /journal/auto
+    discipline/            # awardDisciplinePoints() ledger + GET /me/stats (+ авто-статистика, без баллов)
     academy/               # нед3: курс kodex из книги, квизы, лестница уроков
     referrals/             # нед3: r_-инвайты юзера + список приглашённых (только счётчики)
+    connections/           # нед4: BingX bind/unbind/sync/guide; bingx.client (подпись v2), secret-crypto (AES-256-GCM)
     health/                # GET /api/v1/health (+SELECT 1)
-migrations/                # 001_identity … 005_academy, 006_academy_seed, 007_referrals
+migrations/                # 001_identity … 007_referrals, 008_connections_auto_trades
 scripts/                   # migrate.ts, make-invite.ts, build-academy-seed.ts,
-                           # flow-week2.sh, flow-week3.sh (демо-флоу)
+                           # bingx-mock.js (мок BingX с проверкой подписи),
+                           # flow-week2/3/4.sh (демо-флоу)
 test/                      # auth.e2e, journal.e2e, discipline, academy.e2e, referrals.e2e,
-                           # week3-fixes (jest, runInBand — файлы делят одну тест-БД)
+                           # week3-fixes, connections.e2e (jest, runInBand — файлы делят одну тест-БД)
 ```
 
 ## Правила недели 1

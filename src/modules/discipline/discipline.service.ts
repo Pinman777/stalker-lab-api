@@ -52,9 +52,14 @@ export interface DisciplineStats {
   points: number;
   events: number;
   byType: Record<string, { events: number; points: number }>;
+  /** нед4 (автожурнал): ФАКТЫ биржевых сделок. Идеология: авто-импорт НЕ даёт
+   *  баллов дисциплины (points/events выше его не учитывают) — только статистика. */
+  autoTradesCount: number;
+  autoPnlSum: string; // NUMERIC → string из pg (без потери точности)
 }
 
-/** GET /api/v1/me/stats: сумма дисциплины пользователя по ledger-у (нед2). */
+/** GET /api/v1/me/stats: сумма дисциплины пользователя по ledger-у (нед2)
+ *  + авто-статистика подключений (нед4). */
 export async function getDisciplineStats(exec: Executor, userId: string): Promise<DisciplineStats> {
   const total = await exec.query<{ points: number; events: number }>(
     `SELECT coalesce(sum(points), 0)::int AS points, count(*)::int AS events
@@ -68,7 +73,19 @@ export async function getDisciplineStats(exec: Executor, userId: string): Promis
   );
   const map: Record<string, { events: number; points: number }> = {};
   for (const r of byType.rows) map[r.event_type] = { events: r.events, points: r.points };
-  return { points: total.rows[0]?.points ?? 0, events: total.rows[0]?.events ?? 0, byType: map };
+  const auto = await exec.query<{ count: number; pnl: string | null }>(
+    `SELECT count(*)::int AS count, coalesce(sum(a.pnl_usd), 0)::text AS pnl
+     FROM auto_trades a JOIN connections c ON c.id = a.connection_id
+     WHERE c.user_id = $1`,
+    [userId],
+  );
+  return {
+    points: total.rows[0]?.points ?? 0,
+    events: total.rows[0]?.events ?? 0,
+    byType: map,
+    autoTradesCount: auto.rows[0]?.count ?? 0,
+    autoPnlSum: auto.rows[0]?.pnl ?? '0',
+  };
 }
 
 /** Дисциплина — ledger-only. Сервис-функции выше; контроллер — только /me/stats. */

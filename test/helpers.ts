@@ -47,7 +47,7 @@ export async function resetSchema(db: Executor): Promise<void> {
 export async function truncateAll(db: Executor): Promise<void> {
   // codex_rules и academy-контент (courses/lessons/translations) НЕ трогаем — это сид-каталоги, не юзер-данные.
   await db.query(
-    'TRUNCATE users, invite_codes, audit_log, journal_entries, journal_trades, discipline_events, lesson_progress, referrals RESTART IDENTITY CASCADE',
+    'TRUNCATE users, invite_codes, audit_log, journal_entries, journal_trades, discipline_events, lesson_progress, referrals, connections, auto_trades RESTART IDENTITY CASCADE',
   );
 }
 

@@ -9,6 +9,7 @@ import { JournalModule } from './modules/journal/journal.module';
 import { DisciplineModule } from './modules/discipline/discipline.module';
 import { AcademyModule } from './modules/academy/academy.module';
 import { ReferralsModule } from './modules/referrals/referrals.module';
+import { ConnectionsModule } from './modules/connections/connections.module';
 
 /** Module-per-domain (АРХИТЕКТУРА §1): identity, invites, journal, discipline, academy,
  *  referrals, health. Глобальный фильтр ошибок {error: code} (review #10) — здесь,
@@ -22,6 +23,7 @@ import { ReferralsModule } from './modules/referrals/referrals.module';
     DisciplineModule,
     AcademyModule,
     ReferralsModule,
+    ConnectionsModule,
   ],
   providers: [{ provide: APP_FILTER, useClass: ApiExceptionFilter }],
 })

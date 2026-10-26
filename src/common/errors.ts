@@ -26,4 +26,7 @@ export const errors = {
   entryExists: () => new ApiError(409, 'entry_exists'),
   notImplemented: () => new ApiError(501, 'not_implemented'),
   dbUnavailable: () => new ApiError(503, 'db_unavailable'),
+  invalidApiKey: () => new ApiError(403, 'invalid_api_key'), // нед4: биржа отвергла ключ (bind/синк)
+  connectionExists: () => new ApiError(409, 'connection_exists'), // нед4: venue уже привязан (bind без replace)
+  bingxUnreachable: () => new ApiError(502, 'bingx_unreachable'), // нед4: биржа не отвечает (не ошибка ключа)
 };

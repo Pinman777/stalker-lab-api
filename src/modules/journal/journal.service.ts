@@ -74,6 +74,25 @@ export interface TradeInput {
   violationCode: string | null;
 }
 
+/** ════════════════════════════════════════════════════════════════════════
+ *  ИДЕОЛОГИЯ НЕДЕЛИ 4: АВТО-СДЕЛКИ НЕ ДАЮТ БАЛЛОВ ДИСЦИПЛИНЫ.
+ *  listAutoTrades (ниже) читает ТОЛЬКО факты из auto_trades; ни при каком
+ *  событии синка дисциплина не начисляется. Баллы — за план/ручную запись/разбор.
+ *  ════════════════════════════════════════════════════════════════════════ */
+
+export interface AutoTradeDto {
+  id: number;
+  symbol: string;
+  side: 'long' | 'short';
+  openTime: string;
+  closeTime: string;
+  entryPrice: number;
+  exitPrice: number;
+  pnlUsd: number;
+  leverage: number;
+  venue: string; // авто-сделка всегда через подключение (join connections)
+}
+
 export function toEntryDto(e: EntryRow): EntryDto {
   return {
     id: Number(e.id),
@@ -246,5 +265,46 @@ export class JournalService {
       await writeAudit(userId, ip, 'codex_violation', `${t.violationCode} trade=${row.id}`);
     }
     return toTradeDto(row);
+  }
+
+  /** GET /journal/auto?from&to (нед4): авто-сделки юзера — все его биржевые
+   *  подключения (join connections). Фильтр from/to — по ДАТЕ ЗАКРЫТИЯ позиции
+   *  (close_time, дни YYYY-MM-DD, включительно; «сделка принадлежит» дню закрытия).
+   *  Статистика, не дисциплина: см. комментарий об идеологии выше. */
+  async listAutoTrades(userId: string, from: string | null, to: string | null): Promise<AutoTradeDto[]> {
+    const r = await db.query<{
+      id: string;
+      symbol: string;
+      side: 'long' | 'short';
+      open_time: Date;
+      close_time: Date;
+      entry_price: string;
+      exit_price: string;
+      pnl_usd: string;
+      leverage: number;
+      venue: string;
+    }>(
+      `SELECT a.id, a.symbol, a.side, a.open_time, a.close_time,
+              a.entry_price, a.exit_price, a.pnl_usd, a.leverage, c.venue
+       FROM auto_trades a
+       JOIN connections c ON c.id = a.connection_id
+       WHERE c.user_id = $1
+         AND ($2::date IS NULL OR a.close_time >= $2::date)
+         AND ($3::date IS NULL OR a.close_time < ($3::date + 1))
+       ORDER BY a.close_time DESC, a.id DESC`,
+      [userId, from, to],
+    );
+    return r.rows.map((t) => ({
+      id: Number(t.id),
+      symbol: t.symbol,
+      side: t.side,
+      openTime: t.open_time.toISOString(),
+      closeTime: t.close_time.toISOString(),
+      entryPrice: Number(t.entry_price),
+      exitPrice: Number(t.exit_price),
+      pnlUsd: Number(t.pnl_usd),
+      leverage: Number(t.leverage),
+      venue: t.venue,
+    }));
   }
 }
