@@ -39,7 +39,9 @@ invest-pool. Используется база `stalker_lab_test` (создаё�
 
 ```bash
 # 1) сгенерировать инвайт (ботстрап: created_by NULL; позже --by <userId> --quota N)
-INVITE=$(npm run make-invite --silent | jq -r .code)
+INVITE=$(npm run --silent make-invite)
+echo "$INVITE"                          # {"code":"...","createdBy":null,"quota":1}
+CODE=$(node -e 'console.log(JSON.parse(process.argv[1]).code)' "$INVITE")
 
 # 2) auth: подписанный initData + инвайт (BOT_TOKEN должен совпадать с тем, кем подписано initData)
 INIT_DATA=$(node -e '
