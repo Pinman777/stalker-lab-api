@@ -1,5 +1,6 @@
 import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
 import { verifyInitData, parseTgUser } from '../tg-auth';
+import { verifyJwt } from '../jwt';
 import { config } from '../../config';
 import { db } from '../../db/db';
 import { findUserByTelegramId } from '../../modules/identity/users.repository';
@@ -8,9 +9,11 @@ import { writeAudit } from '../audit';
 import { getIp } from '../ip';
 import { authRateLimiter } from '../rate-limit';
 import type { AuthedRequest } from '../authed-request';
+import type { UserRow } from '../../modules/identity/users.repository';
 
-/** Stateless-аутентификация per request (АРХИТЕКТУРА §1, канон invest-pool AuthGuard):
- *  initData в заголовке x-telegram-init-data на каждый запрос. Обмен на токен — V1.
+/** Stateless-аутентификация per request (АРХИТЕКТУРА §1). Два способа (нед5):
+ *  1) initData в заголовке x-telegram-init-data (TMA — как раньше);
+ *  2) Authorization: Bearer <JWT> (браузер: токен от /auth/code/verify, payload.tg → юзер).
  *  Все отказы (401/403) — в audit_log, как и отказы /auth (review #4).
  *
  *  Фикс ревью нед2 → нед3 (п.2): guard-отказы идут ЧЕРЕЗ authRateLimiter (общий с /auth).
@@ -21,30 +24,50 @@ export class TmaAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<AuthedRequest>();
     const ip = getIp(req);
+
     const header = req.headers['x-telegram-init-data'];
     const initData = Array.isArray(header) ? header[0] : header;
-    if (!initData) {
-      return this.fail(null, ip, 'guard_no_init_data', errors.unauthenticated());
+    if (initData) {
+      const fields = verifyInitData(initData, config.botToken);
+      if (!fields) {
+        return this.fail(null, ip, 'guard_bad_init_data', errors.invalidInitData());
+      }
+      const tg = parseTgUser(fields);
+      if (!tg) {
+        return this.fail(null, ip, 'guard_no_user_field', errors.invalidInitData());
+      }
+      return this.resolveUser(req, tg.id, ip, 'guard_user_not_found');
     }
 
-    const fields = verifyInitData(initData, config.botToken);
-    if (!fields) {
-      return this.fail(null, ip, 'guard_bad_init_data', errors.invalidInitData());
-    }
-    const tg = parseTgUser(fields);
-    if (!tg) {
-      return this.fail(null, ip, 'guard_no_user_field', errors.invalidInitData());
+    const authHeader = req.headers['authorization'];
+    const bearer = Array.isArray(authHeader) ? authHeader[0] : authHeader;
+    if (typeof bearer === 'string' && bearer.startsWith('Bearer ')) {
+      const payload = verifyJwt(bearer.slice('Bearer '.length).trim(), config.jwtSecret);
+      const tg = payload?.tg;
+      if (!payload || typeof tg !== 'number' || !Number.isInteger(tg) || tg <= 0) {
+        return this.fail(null, ip, 'guard_bad_token', errors.unauthenticated());
+      }
+      return this.resolveUser(req, tg, ip, 'guard_token_user_not_found');
     }
 
-    const user = await findUserByTelegramId(db, tg.id);
+    return this.fail(null, ip, 'guard_no_init_data', errors.unauthenticated());
+  }
+
+  /** Общий хвост обоих способов: юзер по telegram_id → blocked → req.user. */
+  private async resolveUser(
+    req: AuthedRequest,
+    telegramId: number,
+    ip: string,
+    notFoundDetail: string,
+  ): Promise<boolean> {
+    const user: UserRow | null = await findUserByTelegramId(db, telegramId);
     if (!user) {
-      // валидная подпись, но юзер не прошёл invite-гейт: фиксируем telegram_id для разбора
-      return this.fail(null, ip, `guard_user_not_found tg=${tg.id}`, errors.userNotFound());
+      // валидные креды, но юзер не прошёл invite-гейт: фиксируем telegram_id для разбора
+      return this.fail(null, ip, `${notFoundDetail} tg=${telegramId}`, errors.userNotFound());
     }
     if (user.is_blocked) {
       return this.fail(user.id, ip, 'guard_blocked', errors.blocked());
     }
-
     req.user = user;
     return true;
   }

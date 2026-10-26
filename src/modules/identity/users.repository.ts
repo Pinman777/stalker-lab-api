@@ -40,6 +40,20 @@ export async function findUserByTelegramId(exec: Executor, telegramId: number): 
   return (r.rows[0] as UserRow | undefined) ?? null;
 }
 
+/** Web-login (нед5): вход по username ИЛИ числовому telegram-id (поле username может
+ *  быть числом). TG-username регистронезависим — сравнение через lower(). */
+export async function findUserByUsernameOrTelegramId(exec: Executor, username: string): Promise<UserRow | null> {
+  if (/^\d+$/.test(username)) {
+    const tgId = Number(username);
+    if (Number.isSafeInteger(tgId) && tgId > 0) {
+      const r = await exec.query('SELECT * FROM users WHERE telegram_id = $1 LIMIT 1', [tgId]);
+      if (r.rows[0]) return r.rows[0] as UserRow;
+    }
+  }
+  const r = await exec.query('SELECT * FROM users WHERE lower(username) = lower($1) LIMIT 1', [username]);
+  return (r.rows[0] as UserRow | undefined) ?? null;
+}
+
 /** Создание юзера — только внутри tx с погашенным инвайтом (identity.service). */
 export async function insertUser(c: Executor, tg: TgUser): Promise<UserRow> {
   const r = await c.query(

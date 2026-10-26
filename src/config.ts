@@ -5,4 +5,5 @@ export const config = {
   port: Number(process.env.PORT || 8910),
   botToken: process.env.BOT_TOKEN || '',
   databaseUrl: process.env.DATABASE_URL || '',
+  jwtSecret: process.env.JWT_SECRET || '', // нед5: подпись web-login JWT; fail-fast на старте
 } as const;

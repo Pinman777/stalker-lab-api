@@ -13,7 +13,10 @@ export const errors = {
   unknownViolationCode: () => new ApiError(400, 'unknown_violation_code'),
   unauthenticated: () => new ApiError(401, 'unauthenticated'),
   invalidInitData: () => new ApiError(401, 'invalid_init_data'),
-  userNotFound: () => new ApiError(401, 'user_not_found'),
+  // нед5 web-login: 404 на /auth/code/* не раскрывает причину (нет юзера = бот не пишет)
+  userNotFound: (status = 401) => new ApiError(status, 'user_not_found'),
+  invalidCode: () => new ApiError(403, 'invalid_code'),
+  tooManyRequests: () => new ApiError(429, 'too_many_requests'),
   inviteRequired: () => new ApiError(403, 'invite_required'),
   blocked: () => new ApiError(403, 'blocked'),
   forbidden: () => new ApiError(403, 'forbidden'),
