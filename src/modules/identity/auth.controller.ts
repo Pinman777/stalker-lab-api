@@ -49,6 +49,17 @@ export class AuthController {
     if (!req.user) throw errors.unauthenticated();
     return { user: toUserDto(req.user) };
   }
+
+  /** Нед5-фикс веб-входа: гашение инвайта ОТДЕЛЬНО от входа — юзер уже опознан
+   *  гвардом (TMA initData ИЛИ Bearer из /auth/code/verify). Ответ как у /me. */
+  @Post('api/v1/auth/invite/redeem')
+  @HttpCode(200)
+  @UseGuards(TmaAuthGuard)
+  async redeemInvite(@Body() body: unknown, @Req() req: AuthedRequest) {
+    if (!req.user) throw errors.unauthenticated();
+    const user = await this.identity.redeemInvite(req.user, parseInviteBody(body), getIp(req));
+    return { user };
+  }
 }
 
 function parseAuthBody(body: unknown): AuthTelegramBody {
@@ -74,4 +85,11 @@ function parseVerifyBody(body: unknown): { username: string; code: string } {
   const code = (body as Record<string, unknown>).code;
   if (typeof code !== 'string' || !/^\d{6}$/.test(code)) throw errors.invalidRequest();
   return { username, code };
+}
+
+function parseInviteBody(body: unknown): string {
+  if (typeof body !== 'object' || body === null) throw errors.invalidRequest();
+  const code = (body as Record<string, unknown>).code;
+  if (typeof code !== 'string' || code.length === 0 || code.length > 64) throw errors.invalidRequest();
+  return code;
 }

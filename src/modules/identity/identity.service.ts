@@ -101,4 +101,42 @@ export class IdentityService {
     await writeAudit(user.id, ip, 'auth_ok');
     return { user: toUserDto(user), isNew: true };
   }
+
+  /** POST /api/v1/auth/invite/redeem (нед5-фикс веб-входа): юзер, уже опознанный
+   *  TmaAuthGuard (initData ИЛИ Bearer из /auth/code/verify), гасит инвайт-код
+   *  ОТДЕЛЬНО от входа. Флага инвайта в users НЕТ (гейт нед1: строка users
+   *  создаётся только вместе с погашением кода в tx выше), поэтому «уже гасил» =
+   *  invite_codes.used_by = user.id. FOR UPDATE на строке юзера сериализует
+   *  параллельные redeem: второй код того же юзера не сгорает (чужой путь не гасим). */
+  async redeemInvite(user: UserRow, code: string, ip: string): Promise<UserDto> {
+    // перебор кодов — та же угроза, что и /auth/telegram: лимитер ДО проверок
+    if (!authRateLimiter.check(ip)) {
+      await writeAudit(user.id, ip, 'invite_redeem_rate_limited');
+      throw errors.rateLimited();
+    }
+
+    const res = await db.tx(async (c): Promise<'ok' | 'already' | 'bad'> => {
+      await c.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [user.id]);
+      const mine = await c.query('SELECT 1 FROM invite_codes WHERE used_by = $1 LIMIT 1', [user.id]);
+      if (mine.rowCount) return 'already';
+      const consumed = await this.invites.consume(c, code, user.id);
+      return consumed.ok ? 'ok' : 'bad';
+    });
+    if (res === 'already') {
+      await writeAudit(user.id, ip, 'invite_redeem_fail', 'already_invited');
+      throw errors.alreadyInvited();
+    }
+    if (res === 'bad') {
+      await writeAudit(user.id, ip, 'invite_redeem_fail', 'bad_invite_code');
+      throw errors.badInviteCode();
+    }
+    await writeAudit(user.id, ip, 'invite_redeemed', maskInviteCode(code));
+    return toUserDto(user);
+  }
+}
+
+/** 'r_AbC12345' → 'r_…45': код целиком в аудите не храним (канон maskUsername). */
+function maskInviteCode(code: string): string {
+  if (code.length <= 4) return `${code.slice(0, 1)}…`;
+  return `${code.slice(0, 2)}…${code.slice(-2)}`;
 }
