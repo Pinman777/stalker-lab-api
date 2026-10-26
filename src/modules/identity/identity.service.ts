@@ -57,7 +57,21 @@ export class IdentityService {
     let user: UserRow;
     try {
       user = await db.tx(async (c) => {
-        const u = await insertUser(c, tg);
+        let u: UserRow;
+        try {
+          u = await insertUser(c, tg);
+        } catch (e: unknown) {
+          // параллельный first-auth того же telegram_id (review #3): уникальный конфликт → уже создан
+          const code = (e as { code?: string }).code;
+          if (code === '23505') {
+            const existing = await findUserByTelegramId(c, tg.id);
+            if (existing) {
+              await c.query('COMMIT');
+              return { user: toUserDto(existing), isNew: false };
+            }
+          }
+          throw e;
+        }
         const consumed = await this.invites.consume(c, inviteCode, u.id);
         if (!consumed) throw errors.inviteRequired();
         return u;

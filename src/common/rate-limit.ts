@@ -7,8 +7,14 @@ export class SlidingWindowRateLimiter {
     private readonly windowMs: number,
   ) {}
 
-  /** true — пропустить; false — лимит исчерпан (попытка НЕ записывается). */
+  /** true — пропустить; false — лимит исчерпан (попытка НЕ записывается).
+   *  Заодно: periodic sweep — уникальные ключи (спуфнутые IP) не растят память бесконечно (review #2). */
   check(key: string, now: number = Date.now()): boolean {
+    if (this.hits.size > 10_000) {
+      for (const [k, ts] of this.hits) {
+        if (ts.every((t) => now - t >= this.windowMs)) this.hits.delete(k);
+      }
+    }
     const fresh = (this.hits.get(key) ?? []).filter((t) => now - t < this.windowMs);
     if (fresh.length >= this.limit) {
       this.hits.set(key, fresh);

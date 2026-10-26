@@ -5,6 +5,10 @@ import { db } from '../src/db/db';
 /** Миграционный runner (канон invest-pool/src/scripts/migrate.ts):
  *  применяет migrations/*.sql по порядку, tracking в schema_migrations. */
 async function main(): Promise<void> {
+  // advisory lock: параллельные запуски (CI + dev) не гоняются (review #6)
+  const lock = await db.query('SELECT pg_try_advisory_lock(894221) AS ok');
+  if (!lock.rows[0]?.ok) { console.log('migrate: другой запуск держит лок — выходим'); await db.end(); return; }
+  try {
   await db.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
     name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`);
   const dir = join(process.cwd(), 'migrations');
@@ -17,7 +21,10 @@ async function main(): Promise<void> {
     await db.query('INSERT INTO schema_migrations (name) VALUES ($1)', [f]);
     console.log('applied', f);
   }
-  await db.end();
+  } finally {
+    await db.query('SELECT pg_advisory_unlock(894221)');
+    await db.end();
+  }
 }
 
 void main().catch((e) => {
