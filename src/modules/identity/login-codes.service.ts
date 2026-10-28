@@ -95,7 +95,7 @@ export class LoginCodesService implements OnModuleInit {
           );
           if (burn.rowCount) {
             const token = signJwt(
-              { tg: Number(user.telegram_id), exp: Math.floor(Date.now() / 1000) + JWT_TTL_SEC },
+              { tg: Number(user.telegram_id), iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + JWT_TTL_SEC },
               config.jwtSecret,
             );
             await writeAudit(user.id, ip, 'login_code_success', maskUsername(username));

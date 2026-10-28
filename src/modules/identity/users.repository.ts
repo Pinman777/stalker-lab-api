@@ -10,6 +10,7 @@ export interface UserRow {
   language: string;
   timezone: string | null;
   is_blocked: boolean;
+  token_revoked_at: Date | null;
   created_at: Date;
 }
 

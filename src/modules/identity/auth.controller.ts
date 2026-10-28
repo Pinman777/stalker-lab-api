@@ -5,6 +5,8 @@ import { toUserDto } from './users.repository';
 import { TmaAuthGuard } from '../../common/guards/tma-auth.guard';
 import { getIp } from '../../common/ip';
 import { errors } from '../../common/errors';
+import { writeAudit } from '../../common/audit';
+import { db } from '../../db/db';
 import type { AuthedRequest } from '../../common/authed-request';
 
 interface AuthTelegramBody {
@@ -48,6 +50,19 @@ export class AuthController {
   me(@Req() req: AuthedRequest) {
     if (!req.user) throw errors.unauthenticated();
     return { user: toUserDto(req.user) };
+  }
+
+  /** Выход (012): гасит ВСЕ веб-сессии юзера — token_revoked_at=now убивает
+   *  каждый Bearer-JWT с iat ≤ now (включая выданные украденной копией).
+   *  TMA-initData не отзывается (это подпись Telegram, не наша сессия). */
+  @Post('api/v1/auth/logout')
+  @HttpCode(200)
+  @UseGuards(TmaAuthGuard)
+  async logout(@Req() req: AuthedRequest) {
+    if (!req.user) throw errors.unauthenticated();
+    await db.query('UPDATE users SET token_revoked_at = now() WHERE id = $1', [req.user.id]);
+    await writeAudit(req.user.id, getIp(req), 'web_logout_all', 'sessions revoked');
+    return { ok: true };
   }
 
   /** Нед5-фикс веб-входа: гашение инвайта ОТДЕЛЬНО от входа — юзер уже опознан
