@@ -145,20 +145,29 @@ function parseCreateEntryBody(body: unknown): { date: string; plan: string; plan
   return { date, plan: parseText(b.plan, 4000), planMeta: parsePlanMeta(b.plan_meta) };
 }
 
-/** План дня (013): слабая валидация полей — лишнее отбрасываем, а не 400-им. */
+/** План дня (013): слабая валидация полей — лишнее отбрасываем, а не 400-им.
+ *  Фронт может слать camelCase (riskDayR) или snake_case (risk_day_r) — принимаем оба. */
 function parsePlanMeta(v: unknown): PlanMeta | null {
   if (typeof v !== 'object' || v === null) return null;
   const b = v as Record<string, unknown>;
+  const pick = (camel: string, snake: string): unknown => {
+    if (b[camel] !== undefined) return b[camel];
+    if (b[snake] !== undefined) return b[snake];
+    return undefined;
+  };
   const out: PlanMeta = {};
-  if (b.mode === 'trend' || b.mode === 'flat' || b.mode === 'chaos') out.mode = b.mode;
-  const riskDayR = Number(b.risk_day_r);
+  const mode = pick('mode', 'mode');
+  if (mode === 'trend' || mode === 'flat' || mode === 'chaos') out.mode = mode;
+  const riskDayR = Number(pick('riskDayR', 'risk_day_r'));
   if (Number.isFinite(riskDayR) && riskDayR > 0 && riskDayR <= 100) out.riskDayR = riskDayR;
-  const maxTrades = Number(b.max_trades);
+  const maxTrades = Number(pick('maxTrades', 'max_trades'));
   if (Number.isInteger(maxTrades) && maxTrades > 0 && maxTrades <= 50) out.maxTrades = maxTrades;
-  if (Array.isArray(b.watchlist)) {
-    out.watchlist = b.watchlist.filter((s): s is string => typeof s === 'string' && /^[A-Z0-9]{1,12}$/.test(s)).slice(0, 12);
+  const wl = pick('watchlist', 'watchlist');
+  if (Array.isArray(wl)) {
+    out.watchlist = wl.filter((s): s is string => typeof s === 'string' && /^[A-Z0-9]{1,12}$/.test(s)).slice(0, 12);
   }
-  if (typeof b.no_go === 'string' && b.no_go.trim()) out.noGo = b.no_go.trim().slice(0, 500);
+  const noGo = pick('noGo', 'no_go');
+  if (typeof noGo === 'string' && noGo.trim()) out.noGo = noGo.trim().slice(0, 500);
   return Object.keys(out).length ? out : null;
 }
 
