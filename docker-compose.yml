@@ -1,0 +1,16 @@
+# Локальная Postgres для stalker-lab-api.
+# Хост-порт 5433: 5432 занят системным кластером.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: stalker
+      POSTGRES_PASSWORD: stalker
+      POSTGRES_DB: stalker_lab
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 256m
+volumes:
+  pgdata:
