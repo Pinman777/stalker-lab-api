@@ -11,7 +11,7 @@ import { TelegramBotApiSender, type TgSender } from './tg-sender';
 const MAX_PER_USER_PER_HOUR = 5; // rate-limit по факту созданных кодов (login_codes — источник правды)
 const MAX_PER_IP_PER_HOUR = 10;
 const MAX_VERIFY_ATTEMPTS = 5;
-const JWT_TTL_SEC = 24 * 3600;
+const JWT_TTL_SEC = 8 * 3600;
 
 interface LoginCodeRow {
   id: string;
