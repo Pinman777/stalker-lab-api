@@ -36,5 +36,6 @@ export const errors = {
   bingxUnreachable: () => new ApiError(502, 'bingx_unreachable'), // нед4: биржа не отвечает (не ошибка ключа)
   bingxRateLimited: () => new ApiError(502, 'bingx_rate_limited'), // w4-fix1: BingX 100419 — лимит запросов, НЕ мёртвый ключ
   syncInProgress: () => new ApiError(409, 'sync_in_progress'), // w4-fix2: advisory-lock — синк этого юзера уже идёт
+  invalidTradeState: () => new ApiError(409, 'invalid_trade_state'), // 013: переход статуса сетапа не по машине (armed→closed мимо entered и т.п.)
   connDecryptFailed: () => new ApiError(503, 'conn_decrypt_failed'), // w4-fix4: api_secret_enc не расшифровывается (ротация CONN_ENC_KEY) — лечится re-bind
 };

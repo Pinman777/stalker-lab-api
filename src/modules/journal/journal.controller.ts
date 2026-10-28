@@ -1,8 +1,8 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { TmaAuthGuard } from '../../common/guards/tma-auth.guard';
 import { errors } from '../../common/errors';
 import { getIp } from '../../common/ip';
-import { JournalService, type AutoTradeDto, type EntryDto, type TradeDto, type TradeInput } from './journal.service';
+import { JournalService, type AutoTradeDto, type EntryDto, type PlanMeta, type TradeDto, type TradeInput } from './journal.service';
 import type { AuthedRequest } from '../../common/authed-request';
 
 /** Журнал (нед2 — ядро продукта): сессия-вылазка на день + сделки + разбор.
@@ -15,7 +15,7 @@ export class JournalController {
   @Post('entries')
   async createEntry(@Body() body: unknown, @Req() req: AuthedRequest): Promise<{ entry: EntryDto }> {
     const b = parseCreateEntryBody(body);
-    const entry = await this.journal.createEntry(req.user!.id, b.date, b.plan);
+    const entry = await this.journal.createEntry(req.user!.id, b.date, b.plan, b.planMeta);
     return { entry };
   }
 
@@ -59,6 +59,48 @@ export class JournalController {
     const range = parseDateRange(from, to);
     return { trades: await this.journal.listAutoTrades(req!.user!.id, range.from, range.to) };
   }
+
+  /** ═══ Вылазки v2 (013): статусная машина сетапа ═══ */
+
+  @Get('codex')
+  async codex() {
+    return { rules: await this.journal.listCodex() };
+  }
+
+  @Post('trades/:id/enter')
+  @HttpCode(200)
+  async enterTrade(@Param('id') id: string, @Body() body: unknown, @Req() req: AuthedRequest) {
+    const price = parseOptionalPrice((body as Record<string, unknown>)?.price);
+    return { trade: await this.journal.enterTrade(req.user!.id, parseId(id), price, getIp(req)) };
+  }
+
+  @Post('trades/:id/close')
+  @HttpCode(200)
+  async closeTrade(@Param('id') id: string, @Body() body: unknown, @Req() req: AuthedRequest) {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const kind = b.kind;
+    if (kind !== 'stop' && kind !== 'take' && kind !== 'manual') throw errors.invalidRequest();
+    const violationCode =
+      b.violation_code === undefined || b.violation_code === null || b.violation_code === ''
+        ? null
+        : parseText(b.violation_code, 64);
+    return {
+      trade: await this.journal.closeTrade(
+        req.user!.id,
+        parseId(id),
+        parsePrice(b.exit_price),
+        kind,
+        violationCode,
+        getIp(req),
+      ),
+    };
+  }
+
+  @Post('trades/:id/cancel')
+  @HttpCode(200)
+  async cancelSetup(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return { trade: await this.journal.cancelSetup(req.user!.id, parseId(id), getIp(req)) };
+  }
 }
 
 // --- валидация входа (канон нед1: parse-функции, 400 invalid_request) ---
@@ -95,12 +137,29 @@ function parseId(id: string): number {
   return Number(id);
 }
 
-function parseCreateEntryBody(body: unknown): { date: string; plan: string } {
+function parseCreateEntryBody(body: unknown): { date: string; plan: string; planMeta: PlanMeta | null } {
   if (typeof body !== 'object' || body === null) throw errors.invalidRequest();
   const b = body as Record<string, unknown>;
   const date = parseDate(b.date);
   assertNotFarFuture(date); // будущее клампим, прошлое свободно (ревью нед2, п.3)
-  return { date, plan: parseText(b.plan, 4000) };
+  return { date, plan: parseText(b.plan, 4000), planMeta: parsePlanMeta(b.plan_meta) };
+}
+
+/** План дня (013): слабая валидация полей — лишнее отбрасываем, а не 400-им. */
+function parsePlanMeta(v: unknown): PlanMeta | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const b = v as Record<string, unknown>;
+  const out: PlanMeta = {};
+  if (b.mode === 'trend' || b.mode === 'flat' || b.mode === 'chaos') out.mode = b.mode;
+  const riskDayR = Number(b.risk_day_r);
+  if (Number.isFinite(riskDayR) && riskDayR > 0 && riskDayR <= 100) out.riskDayR = riskDayR;
+  const maxTrades = Number(b.max_trades);
+  if (Number.isInteger(maxTrades) && maxTrades > 0 && maxTrades <= 50) out.maxTrades = maxTrades;
+  if (Array.isArray(b.watchlist)) {
+    out.watchlist = b.watchlist.filter((s): s is string => typeof s === 'string' && /^[A-Z0-9]{1,12}$/.test(s)).slice(0, 12);
+  }
+  if (typeof b.no_go === 'string' && b.no_go.trim()) out.noGo = b.no_go.trim().slice(0, 500);
+  return Object.keys(out).length ? out : null;
 }
 
 function parseCloseEntryBody(body: unknown): { review: string } {
@@ -129,8 +188,12 @@ function parseTradeBody(body: unknown): TradeInput {
     dir,
     entry: parsePrice(b.entry),
     stop: parsePrice(b.stop),
-    exit: parsePrice(b.exit),
+    exit: b.exit === undefined || b.exit === null ? null : parsePrice(b.exit),
     r: b.r === undefined || b.r === null ? null : parseFinite(b.r),
+    takeProfit: b.take_profit === undefined || b.take_profit === null ? null : parsePrice(b.take_profit),
+    notionalUsd: b.notional_usd === undefined || b.notional_usd === null ? null : parseFinite(b.notional_usd),
+    riskUsd: b.risk_usd === undefined || b.risk_usd === null ? null : parseFinite(b.risk_usd),
+    riskPct: b.risk_pct === undefined || b.risk_pct === null ? null : parseFinite(b.risk_pct),
     setup: b.setup === undefined || b.setup === null ? null : parseText(b.setup, 200),
     violationCode: b.violation_code === undefined || b.violation_code === null ? null : parseText(b.violation_code, 64),
   };
@@ -140,6 +203,11 @@ function parsePrice(v: unknown): number {
   const n = parseFinite(v);
   if (n <= 0) throw errors.invalidRequest(); // цена — положительная
   return n;
+}
+
+function parseOptionalPrice(v: unknown): number | null {
+  if (v === undefined || v === null || v === '') return null;
+  return parsePrice(v);
 }
 
 function parseFinite(v: unknown): number {
