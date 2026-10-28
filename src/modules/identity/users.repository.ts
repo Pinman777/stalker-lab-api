@@ -10,6 +10,7 @@ export interface UserRow {
   language: string;
   timezone: string | null;
   is_blocked: boolean;
+  token_revoked_at: Date | null;
   created_at: Date;
 }
 
@@ -61,5 +62,17 @@ export async function insertUser(c: Executor, tg: TgUser): Promise<UserRow> {
      VALUES ($1, $2, $3, $4) RETURNING *`,
     [tg.id, tg.username, tg.firstName, tg.languageCode || 'en'],
   );
+  return r.rows[0] as UserRow;
+}
+
+/** Синхронизация профиля при входе: username/first_name в Telegram меняются —
+ *  БД обязана следовать, иначе веб-вход по актуальному @username ломается. */
+export async function syncUserProfile(c: Executor, userId: string | number, tg: TgUser): Promise<UserRow> {
+  await c.query(
+    `UPDATE users SET username = $2, first_name = $3, language = coalesce($4, language)
+     WHERE id = $1 AND (username IS DISTINCT FROM $2 OR first_name IS DISTINCT FROM $3)`,
+    [userId, tg.username, tg.firstName, tg.languageCode],
+  );
+  const r = await c.query('SELECT * FROM users WHERE id = $1', [userId]);
   return r.rows[0] as UserRow;
 }

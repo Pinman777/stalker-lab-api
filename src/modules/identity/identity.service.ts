@@ -5,7 +5,7 @@ import { errors } from '../../common/errors';
 import { writeAudit } from '../../common/audit';
 import { db } from '../../db/db';
 import { config } from '../../config';
-import { findUserByTelegramId, insertUser, toUserDto, type UserDto, type UserRow } from './users.repository';
+import { findUserByTelegramId, syncUserProfile, insertUser, toUserDto, type UserDto, type UserRow } from './users.repository';
 import { InvitesService } from '../invites/invites.service';
 import { insertReferral } from '../referrals/referrals.service';
 
@@ -46,7 +46,8 @@ export class IdentityService {
         throw errors.blocked();
       }
       await writeAudit(existing.id, ip, 'auth_ok');
-      return { user: toUserDto(existing), isNew: false };
+      const fresh = tg.username || tg.firstName ? await syncUserProfile(db, existing.id, tg) : existing;
+      return { user: toUserDto(fresh), isNew: false };
     }
 
     if (!inviteCode) {

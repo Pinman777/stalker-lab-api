@@ -16,6 +16,12 @@ export class ReferralsController {
     return { code: await this.referrals.generateInvite(req.user!.id) };
   }
 
+  /** Моя постоянная ссылка: активный код (переиспользуется, генерится только если нет ни одного). Идемпотентно. */
+  @Get('invite')
+  async myInvite(@Req() req: AuthedRequest): Promise<{ code: string }> {
+    return { code: await this.referrals.generateInvite(req.user!.id) };
+  }
+
   /** Кого пригласил: {invited: [{username?, first_name?, joined_at, is_active_journal}], count}. */
   @Get()
   list(@Req() req: AuthedRequest): Promise<ReferralsDto> {

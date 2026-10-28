@@ -47,10 +47,22 @@ export class TmaAuthGuard implements CanActivate {
       if (!payload || typeof tg !== 'number' || !Number.isInteger(tg) || tg <= 0) {
         return this.fail(null, ip, 'guard_bad_token', errors.unauthenticated());
       }
-      return this.resolveUser(req, tg, ip, 'guard_token_user_not_found');
+      const ok = await this.resolveUser(req, tg, ip, 'guard_token_user_not_found');
+      // Ревок (012): logout гасит все веб-сессии юзера — токен с iat ≤ token_revoked_at
+      // (или без iat вовсе, если был ревок) мёртв. TMA-initData не трогаем: это не JWT.
+      if (ok && req.user?.token_revoked_at) {
+        const revokedMs = new Date(req.user.token_revoked_at).getTime();
+        const issuedMs = typeof payload.iat === 'number' ? payload.iat * 1000 : 0;
+        if (issuedMs <= revokedMs) {
+          return this.fail(req.user.id, ip, 'guard_token_revoked', errors.unauthenticated());
+        }
+      }
+      return ok;
     }
 
-    return this.fail(null, ip, 'guard_no_init_data', errors.unauthenticated());
+    // Гость без кредов — штатный неавторизованный визит (веб-превью): не тратит
+    // rate-limiter и не заливает audit. Защита от перебора остаётся на bad_init_data/bad_token.
+    throw errors.unauthenticated();
   }
 
   /** Общий хвост обоих способов: юзер по telegram_id → blocked → req.user. */

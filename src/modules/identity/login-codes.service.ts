@@ -11,7 +11,7 @@ import { TelegramBotApiSender, type TgSender } from './tg-sender';
 const MAX_PER_USER_PER_HOUR = 5; // rate-limit по факту созданных кодов (login_codes — источник правды)
 const MAX_PER_IP_PER_HOUR = 10;
 const MAX_VERIFY_ATTEMPTS = 5;
-const JWT_TTL_SEC = 24 * 3600;
+const JWT_TTL_SEC = 8 * 3600;
 
 interface LoginCodeRow {
   id: string;
@@ -95,7 +95,7 @@ export class LoginCodesService implements OnModuleInit {
           );
           if (burn.rowCount) {
             const token = signJwt(
-              { tg: Number(user.telegram_id), exp: Math.floor(Date.now() / 1000) + JWT_TTL_SEC },
+              { tg: Number(user.telegram_id), iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + JWT_TTL_SEC },
               config.jwtSecret,
             );
             await writeAudit(user.id, ip, 'login_code_success', maskUsername(username));

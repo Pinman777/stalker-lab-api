@@ -90,12 +90,19 @@ it('POST /referrals/invite: код r_+8 из безопасного алфави
   expect(row.rows[0].quota).toBe(1);
 });
 
-it('лимит: 3 активных инвайта, 4-й → 409 invite_limit_reached', async () => {
+it('идемпотентность: повторные POST/GET возвращают ОДИН код (постоянная ссылка)', async () => {
   const u = await newUser();
-  for (let i = 0; i < 3; i++) {
-    const r = await call('POST', '/api/v1/referrals/invite', u);
-    expect(r.status).toBe(200);
-  }
+  const codes = new Set<string>();
+  for (let i = 0; i < 3; i++) codes.add((await call('POST', '/api/v1/referrals/invite', u)).body!.code);
+  codes.add((await call('GET', '/api/v1/referrals/invite', u)).body!.code);
+  expect(codes.size).toBe(1);
+});
+
+it('лимит: 3 активных инвайта → 409 invite_limit_reached', async () => {
+  const u = await newUser();
+  // спека v2: API идемпотентен (один код на юзера), поэтому лимит проверяем прямым
+  // созданием трёх активных кодов — как если бы юзер давно раздавал ссылки
+  for (let i = 0; i < 3; i++) await createInviteCode(db, String(u.id), 1);
   const fourth = await call('POST', '/api/v1/referrals/invite', u);
   expect(fourth.status).toBe(409);
   expect(fourth.body!.error).toBe('invite_limit_reached');
@@ -103,13 +110,13 @@ it('лимит: 3 активных инвайта, 4-й → 409 invite_limit_rea
 
 it('погашенный инвайт освобождает слот: после регистрации по коду можно генерить дальше', async () => {
   const u = await newUser();
-  const codes: string[] = [];
-  for (let i = 0; i < 3; i++) codes.push((await call('POST', '/api/v1/referrals/invite', u)).body!.code);
-  await newUser(codes[0]); // погасили первый код
+  const code = (await call('POST', '/api/v1/referrals/invite', u)).body!.code;
+  await newUser(code); // погасили код (постоянная ссылка «израсходована»)
 
-  const again = await call('POST', '/api/v1/referrals/invite', u); // активных снова 2 → можно
+  const again = await call('POST', '/api/v1/referrals/invite', u); // активных 0 → новый код
   expect(again.status).toBe(200);
   expect(again.body!.code).toMatch(/^r_[a-z2-9]{8}$/);
+  expect(again.body!.code).not.toBe(code);
 });
 
 // --- привязка при регистрации ---
@@ -153,7 +160,7 @@ it('is_active_journal: false до записи в журнале, true посл�
 it('CLI-инвайт (created_by NULL) привязки не создаёт; пустой список — нули', async () => {
   const u = await newUser(); // вошёл по CLI-коду
   const empty = await call('GET', '/api/v1/referrals', u);
-  expect(empty.body!).toEqual({ invited: [], count: 0 });
+  expect(empty.body!).toEqual({ invited: [], count: 0, bonus_points: 0, per_referral: 100 });
 
   const newcomer = await newUser(); // тоже CLI-код
   const binding = await db.query('SELECT 1 FROM referrals WHERE invited_uid = $1', [newcomer.id]);

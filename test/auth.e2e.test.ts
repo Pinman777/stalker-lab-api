@@ -181,11 +181,13 @@ it('guard-отказы пишутся в audit: нет заголовка / би
   expect(nf.status).toBe(401);
   expect(((await nf.json()) as { error: string }).error).toBe('user_not_found');
 
+  // Спека v2 (анти-спам audit): гость без заголовка — штатный визит, 401 БЕЗ audit-записи
+  // и без расхода rate-limiter; перебор (битая подпись / неизвестный юзер) — с audit.
   const audit = await db.query<{ detail: string }>(
     `SELECT detail FROM audit_log WHERE action = 'auth_fail' AND detail LIKE 'guard_%' ORDER BY id`,
   );
   const details = audit.rows.map((r) => r.detail);
-  expect(details).toContain('guard_no_init_data');
+  expect(details).not.toContain('guard_no_init_data');
   expect(details).toContain('guard_bad_init_data');
   expect(details.some((d) => d.startsWith('guard_user_not_found tg='))).toBe(true);
 });

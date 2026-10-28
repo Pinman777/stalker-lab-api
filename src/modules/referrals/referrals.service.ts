@@ -24,6 +24,8 @@ export interface ReferralDto {
 export interface ReferralsDto {
   invited: ReferralDto[];
   count: number;
+  bonus_points: number;
+  per_referral: number;
 }
 
 /** Привязка реферала — внутри tx создания юзера (identity.service). PK = invited_uid:
@@ -38,7 +40,12 @@ export async function insertReferral(
     'INSERT INTO referrals (invited_uid, referrer_uid, invite_code) VALUES ($1, $2, $3)',
     [invitedUid, referrerUid, inviteCode],
   );
+  // Реферальное вознаграждение: +100 баллов пригласившему (в той же tx)
+  await c.query('UPDATE users SET bonus_points = bonus_points + $1 WHERE id = $2', [REFERRAL_BONUS, referrerUid]);
 }
+
+/** Внутренняя валюта: баллы за каждого зарегистрировавшегося приглашённого. */
+export const REFERRAL_BONUS = 100;
 
 @Injectable()
 export class ReferralsService {
@@ -46,6 +53,14 @@ export class ReferralsService {
    *  Коллизия кода (PK) практически исключена (35^8), но честно ретраится. */
   async generateInvite(userId: string): Promise<string> {
     return db.tx(async (c) => {
+      // Постоянная ссылка: сначала переиспользуем существующий неиспользованный r_-код
+      // (CLI-коды администратора без префикса r_ не считаются — это другой тип инвайтов)
+      const reuse = await c.query<{ code: string }>(
+        "SELECT code FROM invite_codes WHERE created_by = $1 AND used_by IS NULL AND code LIKE 'r\\_%' ORDER BY created_at LIMIT 1",
+        [userId],
+      );
+      if (reuse.rows[0]) return reuse.rows[0].code;
+
       const active = await c.query<{ n: number }>(
         'SELECT count(*)::int AS n FROM invite_codes WHERE created_by = $1 AND used_by IS NULL',
         [userId],
@@ -82,7 +97,10 @@ export class ReferralsService {
        ORDER BY r.created_at`,
       [userId],
     );
+    const b = await db.query<{ bp: number }>('SELECT bonus_points AS bp FROM users WHERE id = $1', [userId]);
     return {
+      bonus_points: b.rows[0]?.bp ?? 0,
+      per_referral: REFERRAL_BONUS,
       invited: r.rows.map((row) => ({
         username: row.username,
         first_name: row.first_name,
